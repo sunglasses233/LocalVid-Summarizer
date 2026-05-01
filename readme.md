@@ -88,3 +88,10 @@ python launcher.py
 需要注意的小问题（懒得修了）：
 whisper_worker.py代码第 57 行写死了模型下载路径：download_root=r"G:\WhisperModels"。这虽然不算严重隐私，但在别人的电脑上大概率会报错。  
 行动建议：建议将其修改为相对路径（如 ./models）或使用环境变量，例如：download_root=os.environ.get("WHISPER_MODEL_DIR", "./models")。
+
+---
+后续升级计划：
+- [ ] 更好的whisper模型
+- [ ] 支持导出更多格式
+- [ ] 支持文件夹
+- [ ] 支持更多平台
