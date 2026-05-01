@@ -28,7 +28,7 @@
 ### 1. 克隆与安装依赖
 
 ```bash
-git clone https://github.com/your-username/your-repo-name.git
+git clone https://github.com/sunglasses233/LocalVid-Summarizer.git
 cd your-repo-name
 pip install -r requirements.txt
 ```
