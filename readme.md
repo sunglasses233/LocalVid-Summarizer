@@ -1,3 +1,7 @@
+以下基本都是AI生成的，我可能也会在B站做个视频讲这玩意怎么用
+
+---
+
 # 🎬 视听内容 AI 助手 - 总控司令部
 
 这是一个强大的、完全支持本地化部署的 AI 视听内容处理系统。它能够自动提取视频/音频内容，利用 Whisper 进行高精度语音转写，并调用本地大模型（如通过 LM Studio）生成思维导图、内容大纲、核心要点等总结信息。
@@ -39,7 +43,6 @@ pip install -r requirements.txt
 ### 3. 配置视频下载 Cookie (可选)
 
 如果你需要抓取需要登录的视频平台资源，请在项目根目录创建一个 `cookies.txt` 文件，并放入你的浏览器导出 Cookies。
-> **⚠️ 警告：请不要将真实的 `cookies.txt` 提交到公开仓库，建议在 `.gitignore` 中将其忽略。**
 
 ### 4. 一键启动系统
 
@@ -79,3 +82,9 @@ python launcher.py
 ## 📄 开源协议
 
 本项目采用 MIT License 开源，详情请参见 LICENSE 文件。
+
+
+---
+需要注意的小问题（懒得修了）：
+whisper_worker.py代码第 57 行写死了模型下载路径：download_root=r"G:\WhisperModels"。这虽然不算严重隐私，但在别人的电脑上大概率会报错。  
+行动建议：建议将其修改为相对路径（如 ./models）或使用环境变量，例如：download_root=os.environ.get("WHISPER_MODEL_DIR", "./models")。
