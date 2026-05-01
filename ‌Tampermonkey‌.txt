@@ -1,0 +1,187 @@
+// ==UserScript==
+// @name         🎬 一键发送至本地视听 AI 助手 (V3全场景版)
+// @namespace    http://tampermonkey.net/
+// @version      3.0
+// @description  支持B站播放页、首页、动态、稍后再看、收藏夹。自动提取纯净BV号，穿透所有复杂列表URL。
+// @author       编程大师2.0
+// @match        *://*.bilibili.com/*
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const API_URL = "http://127.0.0.1:8000/api/tasks";
+
+    // ================= 核心工具: 纯净 URL 提取器 =================
+    function getCleanBiliUrl(rawUrl) {
+        if (!rawUrl) return "";
+        // 强大的正则：精准捕获以 BV 开头，长度为 10 位的 Base58 字符串
+        const bvMatch = rawUrl.match(/(BV[1-9A-HJ-NP-Za-km-z]{10})/i);
+        if (bvMatch && bvMatch[1]) {
+            // 只要找到 BV 号，强制重置为最标准的视频链接
+            return `https://www.bilibili.com/video/${bvMatch[1]}/`;
+        }
+        // 如果没有BV号（比如番剧 ep 链接），做降级兼容
+        if (rawUrl.startsWith('//')) {
+            return 'https:' + rawUrl;
+        }
+        return rawUrl;
+    }
+
+    // ================= 通用发送函数 =================
+    function sendTaskToLocal(url, title, btnElement, isSmallBtn = false) {
+        const originalText = btnElement.innerHTML;
+
+        btnElement.innerHTML = isSmallBtn ? '⏳' : '⏳ 正在发送...';
+        btnElement.style.backgroundColor = '#9e9e9e';
+        btnElement.disabled = true;
+
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: API_URL,
+            headers: { "Content-Type": "application/json" },
+            data: JSON.stringify({
+                source_type: "url",
+                source_path: url,
+                title: title
+            }),
+            onload: function(response) {
+                if (response.status === 200) {
+                    btnElement.innerHTML = isSmallBtn ? '✅' : '✅ 成功加入！';
+                    btnElement.style.backgroundColor = '#4caf50';
+                } else {
+                    btnElement.innerHTML = isSmallBtn ? '❌' : '❌ 失败';
+                    btnElement.style.backgroundColor = '#f44336';
+                }
+                setTimeout(() => resetBtn(btnElement, originalText), 3000);
+            },
+            onerror: function(err) {
+                btnElement.innerHTML = isSmallBtn ? '🚫' : '🚫 无法连接';
+                btnElement.style.backgroundColor = '#f44336';
+                setTimeout(() => resetBtn(btnElement, originalText), 3000);
+            }
+        });
+    }
+
+    function resetBtn(btn, text) {
+        btn.innerHTML = text;
+        btn.style.backgroundColor = 'rgba(251, 114, 153, 0.85)';
+        btn.disabled = false;
+    }
+
+    // ================= 模块 1: 播放页全局悬浮按钮 =================
+    function initGlobalButton() {
+        if (!window.location.href.includes('/video/') && !window.location.href.includes('/list/')) return;
+        if (document.getElementById('ai-global-btn')) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'ai-global-btn';
+        btn.innerHTML = '🤖 发送给 AI 总结';
+        btn.style.cssText = `
+            position: fixed; right: 30px; bottom: 120px; z-index: 999999;
+            padding: 12px 24px; font-size: 16px; font-weight: bold; color: #fff;
+            background-color: rgba(251, 114, 153, 0.9); border: none; border-radius: 8px;
+            cursor: pointer; box-shadow: 0 4px 12px rgba(251, 114, 153, 0.4);
+            transition: all 0.3s ease; backdrop-filter: blur(5px);
+        `;
+
+        btn.onmouseover = () => btn.style.transform = 'scale(1.05) translateY(-2px)';
+        btn.onmouseout = () => btn.style.transform = 'scale(1) translateY(0)';
+
+        btn.addEventListener('click', () => {
+            let cleanTitle = document.title.replace(/_哔哩哔哩_bilibili.*/, '').trim();
+            // 在播放页也用纯净提取器洗一遍当前 URL
+            let cleanUrl = getCleanBiliUrl(window.location.href);
+            sendTaskToLocal(cleanUrl, cleanTitle, btn, false);
+        });
+
+        document.body.appendChild(btn);
+    }
+
+    // ================= 模块 2: 卡片列表注入逻辑 =================
+    function injectCardButtons() {
+        // 兼容更广泛的卡片容器：动态、首页、稍后再看、收藏夹
+        const cards = document.querySelectorAll('.bili-dyn-card-video, .bili-video-card, .video-card');
+
+        cards.forEach(card => {
+            if (card.querySelector('.ai-card-btn')) return;
+
+            // 寻找封面区域 (包含新发现的 bili-video-card__cover 和 bili-cover-card__thumbnail)
+            const coverArea = card.querySelector('.bili-dyn-card-video__header, .bili-video-card__image, .bili-video-card__cover, .bili-cover-card__thumbnail');
+            if (!coverArea) return;
+
+            coverArea.style.position = 'relative';
+
+            const miniBtn = document.createElement('div');
+            miniBtn.className = 'ai-card-btn';
+            miniBtn.innerHTML = '🤖 AI';
+            miniBtn.title = "发送给本地 AI 进行总结";
+            miniBtn.style.cssText = `
+                position: absolute; left: 6px; bottom: 6px; z-index: 100;
+                padding: 2px 6px; font-size: 12px; font-weight: bold; color: #fff;
+                background-color: rgba(251, 114, 153, 0.85); border-radius: 4px;
+                cursor: pointer; transition: background-color 0.2s;
+                display: flex; align-items: center; justify-content: center;
+                backdrop-filter: blur(2px);
+            `;
+
+            miniBtn.onmouseover = () => miniBtn.style.backgroundColor = '#fb7299';
+            miniBtn.onmouseout = () => miniBtn.style.backgroundColor = 'rgba(251, 114, 153, 0.85)';
+
+            miniBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+
+                // 找链接：如果是a标签本身，或者包含a标签
+                let aTag = card.tagName.toLowerCase() === 'a' ? card : card.querySelector('a');
+                let rawUrl = aTag ? aTag.href : "";
+
+                // 🚀 核心：清洗并提取出绝对纯净的 BV 链接
+                let finalUrl = getCleanBiliUrl(rawUrl);
+
+                // 找标题：兼容稍后再看的 .bili-video-card__title
+                const titleNode = card.querySelector('.bili-dyn-card-video__title, .bili-video-card__info--tit, .bili-video-card__title, .title');
+                let title = "B站视频";
+                if (titleNode) {
+                    // 优先取 title 属性（通常是完整的），其次取内部文字
+                    title = titleNode.getAttribute('title') || titleNode.innerText.trim();
+                } else {
+                    // 如果找不到标题DOM，尝试从图片的 alt 属性里捞
+                    const img = card.querySelector('img');
+                    if (img && img.alt) title = img.alt;
+                }
+
+                if (finalUrl) {
+                    sendTaskToLocal(finalUrl, title, miniBtn, true);
+                } else {
+                    miniBtn.innerHTML = '❌ 无效链接';
+                }
+            });
+
+            coverArea.appendChild(miniBtn);
+        });
+    }
+
+    // ================= 主干控制器 =================
+    window.addEventListener('load', () => {
+        initGlobalButton();
+        injectCardButtons();
+    });
+
+    const observer = new MutationObserver((mutations) => {
+        let shouldInject = false;
+        mutations.forEach(mutation => {
+            if (mutation.addedNodes.length > 0) shouldInject = true;
+        });
+
+        if (shouldInject) {
+            injectCardButtons();
+            initGlobalButton();
+        }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+})();
