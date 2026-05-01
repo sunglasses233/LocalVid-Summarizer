@@ -1,0 +1,17 @@
+# Web 框架与服务器 (调度中心)
+fastapi
+uvicorn
+pydantic
+
+# 音频转录引擎 (Whisper Worker)
+faster-whisper
+
+# 大模型接口与网络请求 (总结与通信)
+openai
+requests
+
+# 视频/音频下载器 (Worker)
+yt-dlp
+
+# 前端交互界面 (Streamlit App)
+streamlit
