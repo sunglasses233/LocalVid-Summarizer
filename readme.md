@@ -1,4 +1,4 @@
-以下基本都是AI生成的，我可能也会在B站做个视频讲这玩意怎么用
+以下基本都是AI生成的，我也在B站做了个视频讲这玩意怎么用（BV1VxR5BPEjt、BV1xJoNBPEtD）
 
 ---
 
@@ -29,7 +29,7 @@
 
 ```bash
 git clone https://github.com/sunglasses233/LocalVid-Summarizer.git
-cd your-repo-name
+cd LocalVid-Summarizer
 pip install -r requirements.txt
 ```
 
@@ -85,7 +85,7 @@ python launcher.py
 
 
 ---
-需要注意的小问题（懒得修了）：
+需要注意的小问题（懒得改了）：
 whisper_worker.py代码第 57 行写死了模型下载路径：download_root=r"G:\WhisperModels"。这虽然不算严重隐私，但在别人的电脑上大概率会报错。  
 行动建议：建议将其修改为相对路径（如 ./models）或使用环境变量，例如：download_root=os.environ.get("WHISPER_MODEL_DIR", "./models")。
 
