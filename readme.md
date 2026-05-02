@@ -104,6 +104,34 @@ model = WhisperModel(
 第一次运行可能会多花一点时间下载，之后就会直接读取本地缓存，非常方便！
 
 ---
+
+有关小伙伴问的A卡能不能跑的问题，答案是A卡可以跑，但是代码要做一些调整：
+把 whisper_worker.py 中 transcribe_and_save 函数开头的代码替换为下面这段：
+```
+import torch # 需要在文件顶部 import torch
+
+    # 自动检测环境：如果有 NVIDIA 显卡就用 CUDA，否则自动降级为 CPU
+    if torch.cuda.is_available():
+        run_device = "cuda"
+        run_compute_type = "float16"
+        print(f"[Whisper Worker] 🟢 检测到 NVIDIA 显卡，将启用 GPU 加速 (float16)...", flush=True)
+    else:
+        run_device = "cpu"
+        run_compute_type = "int8"
+        print(f"[Whisper Worker] 🟡 未检测到 NVIDIA 显卡 (或为 AMD/核显)，已自动切换至 CPU 模式 (int8)...", flush=True)
+
+    print(f"[Whisper Worker] 正在加载模型 {model_size} 到 {run_device}...", flush=True)
+    try:
+        model = WhisperModel(
+            model_size, 
+            device=run_device, 
+            compute_type=run_compute_type, 
+            download_root=r"G:\WhisperModels",  # 记得根据之前的建议改成相对路径
+            local_files_only=False 
+        )
+```
+
+---
 后续升级计划：
 - [ ] 更好的whisper模型
 - [ ] 支持导出更多格式
