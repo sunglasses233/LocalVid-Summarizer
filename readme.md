@@ -85,9 +85,21 @@ python launcher.py
 
 
 ---
+
 需要注意的小问题（懒得改了）：
-whisper_worker.py代码第 57 行写死了模型下载路径：download_root=r"G:\WhisperModels"。这虽然不算严重隐私，但在别人的电脑上大概率会报错。  
+whisper_worker.py代码第 57 行写死了模型下载路径：download_root=r"G:\WhisperModels"。在别人的电脑上大概率会报错。  
 行动建议：建议将其修改为相对路径（如 ./models）或使用环境变量，例如：download_root=os.environ.get("WHISPER_MODEL_DIR", "./models")。
+
+另外如果本地没有whisper模型的话，可以将“whisper_worker.py”的这一串代码修改一下，就会自动下载对应的模型：
+model = WhisperModel(
+            model_size, 
+            device=device, 
+            compute_type="float16", 
+            download_root=r"G:\WhisperModels", 
+            local_files_only=False  # 改为 False 允许自动下载
+        )
+
+第一次运行可能会多花一点时间下载，之后就会直接读取本地缓存，非常方便！
 
 ---
 后续升级计划：
