@@ -1,8 +1,9 @@
 import sqlite3
 import uuid
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
-DB_PATH = "tasks.db"
+
+from config import DB_PATH
 
 def get_conn() -> sqlite3.Connection:
     """获取数据库连接，配置为字典工厂以便直接返回 JSON 友好的数据"""
@@ -24,6 +25,11 @@ def init_db() -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        # [编程大师2.0 新增]：利用 try-except 优雅无损扩展 options 字段，不破坏老数据
+        try:
+            conn.execute("ALTER TABLE video_tasks ADD COLUMN options TEXT DEFAULT '{}'")
+        except sqlite3.OperationalError:
+            pass # 列已存在，忽略报错
 
 def reset_zombie_tasks() -> None:
     """系统重启时，将进行中（死掉）的任务重置为排队状态"""
@@ -34,13 +40,15 @@ def reset_zombie_tasks() -> None:
             WHERE status IN ('downloading', 'transcribing')
         ''')
 
-def create_task(source_type: str, source_path: str, title: str) -> str:
+def create_task(source_type: str, source_path: str, title: str, options: dict = None) -> str:
     """创建一个新任务进入队列"""
+    import json
     task_id = uuid.uuid4().hex
+    opts_str = json.dumps(options or {})
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO video_tasks (id, source_type, source_path, title, status) VALUES (?, ?, ?, ?, 'pending')",
-            (task_id, source_type, source_path, title)
+            "INSERT INTO video_tasks (id, source_type, source_path, title, status, options) VALUES (?, ?, ?, ?, 'pending', ?)",
+            (task_id, source_type, source_path, title, opts_str)
         )
     return task_id
 

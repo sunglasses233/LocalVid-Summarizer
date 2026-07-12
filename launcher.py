@@ -4,6 +4,7 @@ import os
 import urllib.request
 import json
 import time
+from config import BASE_DIR, STREAMLIT_MAX_UPLOAD_MB, TASK_API_URL
 
 print("="*50)
 print("🎬 视听内容 AI 助手 - 总控司令部")
@@ -15,20 +16,20 @@ processes = []
 try:
     # 1. 启动 API 调度中心
     print("🚀 启动 [FastAPI 调度中心]...")
-    p1 = subprocess.Popen([sys.executable, "server.py"])
+    p1 = subprocess.Popen([sys.executable, str(BASE_DIR / "server.py")], cwd=str(BASE_DIR))
     processes.append(p1)
 
     # 2. 启动后台 Worker
     print("🚀 启动 [Whisper 消费进程]...")
-    p2 = subprocess.Popen([sys.executable, "worker.py"])
+    p2 = subprocess.Popen([sys.executable, str(BASE_DIR / "worker.py")], cwd=str(BASE_DIR))
     processes.append(p2)
 
     # 3. 启动 Streamlit UI (放宽上传限制，以备不时之需)
     print("🚀 启动 [Streamlit 界面]...\n")
     p3 = subprocess.Popen([
-        sys.executable, "-m", "streamlit", "run", "app.py", 
-        "--server.maxUploadSize", "2048"
-    ])
+        sys.executable, "-m", "streamlit", "run", str(BASE_DIR / "app.py"),
+        "--server.maxUploadSize", str(STREAMLIT_MAX_UPLOAD_MB)
+    ], cwd=str(BASE_DIR))
     processes.append(p3)
 
     print("✅ 系统全部启动完毕！浏览器即将自动打开。")
@@ -60,7 +61,7 @@ try:
 
         if os.path.exists(clean_path):
             # 将路径打包，通过 HTTP POST 瞬间塞给本地的 FastAPI
-            url = "http://127.0.0.1:8000/api/tasks"
+            url = TASK_API_URL
             data = json.dumps({
                 "source_type": "local_file",
                 "source_path": clean_path,

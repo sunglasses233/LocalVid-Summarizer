@@ -1,0 +1,263 @@
+// ==UserScript==
+// @name         🎬 一键发送至本地视听 AI 助手 (V6.3 强制降噪版)
+// @namespace    http://tampermonkey.net/
+// @version      6.3
+// @description  移除前端面板，后端静默强制启用 AI 人声深度降噪，追求极致识别率。
+// @author       编程大师2.0
+// @match        *://*.bilibili.com/*
+// @match        *://*.douyin.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      127.0.0.1
+// ==/UserScript==
+
+(function() {
+    'use strict';
+    const API_URL = "http://127.0.0.1:8000/api/tasks";
+
+    // [编程大师2.0 升级]：取消本地存储与前端面板，强行锁定降噪为 true
+    const globalConfig = {
+        use_vocal_separation: true
+    };
+    
+    // ================= 抖音 React 内存穿透引擎 =================
+    function extractDouyinDirectUrl(node) {
+        let awemeInfo = null;
+        if (node) {
+            let current = node;
+            while (current instanceof HTMLElement) {
+                const fiberKey = Object.keys(current).find(key => key.startsWith("__reactFiber$"));
+                if (fiberKey && current[fiberKey]) {
+                    let fiber = current[fiberKey];
+                    while(fiber) {
+                        const props = fiber.memoizedProps;
+                        const candidate = props?.awemeInfo || props?.itemInfo?.awemeInfo || (props?.itemInfo?.awemeId ? props.itemInfo : null);
+                        if (candidate && candidate.video) {
+                            awemeInfo = candidate;
+                            break;
+                        }
+                        fiber = fiber.return;
+                    }
+                }
+                if (awemeInfo) break;
+                current = current.parentElement;
+            }
+        } else {
+            const player = window.player || (typeof unsafeWindow !== 'undefined' ? unsafeWindow.player : null);
+            if (player && player.config && player.config.awemeInfo) {
+                awemeInfo = player.config.awemeInfo;
+            }
+        }
+        if (!awemeInfo || !awemeInfo.video) return null;
+        const video = awemeInfo.video;
+        let playUrl = "";
+        let bitRates = (video.bitRateList || []).filter(x => x.format !== "dash");
+        if (bitRates.length > 0) {
+            const sorted = bitRates.sort((a,b) => (b.dataSize || 0) - (a.dataSize || 0)); 
+            playUrl = sorted[0].playApi || (sorted[0].playAddr ? sorted[0].playAddr[0]?.src : "");
+        } 
+        if (!playUrl) playUrl = video.playApi || (video.playAddr ? video.playAddr[0]?.src : "");
+        if (playUrl && playUrl.startsWith("//")) playUrl = "https:" + playUrl;
+        return playUrl;
+    }
+
+    // ================= 1. 平台策略引擎 =================
+    const platforms = {
+        bilibili: {
+            match: () => window.location.hostname.includes('bilibili.com'),
+            getCleanUrl: (rawUrl) => {
+                if (!rawUrl) return "";
+                const bvMatch = rawUrl.match(/(BV[1-9A-HJ-NP-Za-km-z]{10})/i);
+                if (bvMatch && bvMatch[1]) return `https://www.bilibili.com/video/${bvMatch[1]}/`;
+                return rawUrl.startsWith('//') ? 'https:' + rawUrl : rawUrl;
+            },
+            getCardSelectors: () => '.bili-dyn-card-video, .bili-video-card, .video-card',
+            extractInfo: (card) => {
+                const coverArea = card.querySelector('.bili-dyn-card-video__header, .bili-video-card__image, .bili-video-card__cover, .bili-cover-card__thumbnail');
+                let aTag = card.tagName.toLowerCase() === 'a' ? card : card.querySelector('a');
+                const titleNode = card.querySelector('.bili-dyn-card-video__title, .bili-video-card__info--tit, .bili-video-card__title, .title');
+                let title = titleNode ? (titleNode.getAttribute('title') || titleNode.innerText.trim()) : "B站视频";
+                return { coverArea, url: aTag ? aTag.href : "", title };
+            },
+            isDetailPage: () => window.location.pathname.includes('/video/') || window.location.pathname.includes('/list/'),
+            getDetailTitle: () => document.title.replace(/_哔哩哔哩_bilibili.*/, '').trim(),
+            btnStyle: 'left: 6px; bottom: 21px; padding: 2px 6px; font-size: 12px;',
+            getDirectUrl: (card) => null
+        },
+        douyin: {
+            match: () => window.location.hostname.includes('douyin.com'),
+            getCleanUrl: (rawUrl) => {
+                if (!rawUrl) return "";
+                let cleanUrl = rawUrl.startsWith('//') ? 'https:' + rawUrl : rawUrl;
+                try { return new URL(cleanUrl).origin + new URL(cleanUrl).pathname; } catch(e) { return cleanUrl; }
+            },
+            getCardSelectors: () => 'a[href*="/video/"]',
+            extractInfo: (card) => {
+                const aTag = card;
+                const coverArea = aTag.querySelector('div') || aTag;
+                let title = "抖音内容";
+                const img = aTag.querySelector('img');
+                if (img && img.alt) title = img.alt;
+                else {
+                    const pTag = aTag.querySelector('p');
+                    if (pTag) title = pTag.innerText.trim();
+                }
+                return { coverArea, url: aTag.href, title };
+            },
+            isDetailPage: () => window.location.pathname.includes('/video/'),
+            getDetailTitle: () => document.title.replace(/ - 抖音.*/, '').trim(),
+            btnStyle: 'left: 10px; bottom: 35px; padding: 15px 20px; font-size: 14px; box-shadow: 0 2px 4px rgba(0,0,0,0.3);',
+            getDirectUrl: (card) => extractDouyinDirectUrl(card)
+        }
+    };
+    const currentPlatform = Object.values(platforms).find(p => p.match());
+    if (!currentPlatform) return;
+
+    // ================= 2. 核心网络通信 =================
+    function sendTaskToLocal(sourceType, sourcePath, title, btnElement, isSmallBtn = false) {
+        const originalText = btnElement.innerHTML;
+        btnElement.innerHTML = isSmallBtn ? '⏳' : '⏳ 正在发送...';
+        btnElement.style.backgroundColor = '#9e9e9e';
+        btnElement.style.pointerEvents = 'none';
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: API_URL,
+            headers: { "Content-Type": "application/json" },
+            data: JSON.stringify({ 
+                source_type: sourceType, 
+                source_path: sourcePath, 
+                title: title,
+                // 发送时将强制开启的参数静默封入请求体
+                options: { use_vocal_separation: globalConfig.use_vocal_separation }
+            }),
+            onload: function(response) {
+                if (response.status === 200) {
+                    btnElement.innerHTML = isSmallBtn ? '✅' : '✅ 成功！';
+                    btnElement.style.backgroundColor = '#4caf50';
+                } else {
+                    btnElement.innerHTML = isSmallBtn ? '❌' : '❌ 失败';
+                    btnElement.style.backgroundColor = '#f44336';
+                }
+                setTimeout(() => resetBtn(btnElement, originalText), 3000);
+            },
+            onerror: function() {
+                btnElement.innerHTML = isSmallBtn ? '🚫' : '🚫 失败';
+                btnElement.style.backgroundColor = '#f44336';
+                setTimeout(() => resetBtn(btnElement, originalText), 3000);
+            }
+        });
+    }
+
+    function resetBtn(btn, text) {
+        btn.innerHTML = text;
+        btn.style.backgroundColor = 'rgba(251, 114, 153, 0.85)';
+        btn.style.pointerEvents = 'auto';
+    }
+
+    // ================= 3. 页面注入逻辑 =================
+    function injectCardButtons() {
+        const cards = document.querySelectorAll(currentPlatform.getCardSelectors());
+        cards.forEach(card => {
+            if (card.dataset.aiInjected === "true" || card.querySelector('.ai-card-btn')) return;
+
+            const { coverArea, url, title } = currentPlatform.extractInfo(card);
+            if (!coverArea || !url) return;
+
+            card.dataset.aiInjected = "true";
+            coverArea.style.position = 'relative';
+
+            const miniBtn = document.createElement('div');
+            miniBtn.className = 'ai-card-btn';
+            miniBtn.innerHTML = '🤖 AI';
+            miniBtn.style.cssText = `
+                position: absolute; z-index: 100;
+                font-weight: bold; color: #fff;
+                background-color: rgba(251, 114, 153, 0.85); border-radius: 4px;
+                cursor: pointer; backdrop-filter: blur(2px);
+                ${currentPlatform.btnStyle}
+            `;
+
+            miniBtn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+
+                let finalUrl = currentPlatform.getCleanUrl(url); 
+                const directUrl = currentPlatform.getDirectUrl(card); 
+
+                if (directUrl && finalUrl) {
+                    sendTaskToLocal("direct_url", finalUrl + "|||" + directUrl, title, miniBtn, true);
+                } else if (finalUrl) {
+                    sendTaskToLocal("url", finalUrl, title, miniBtn, true);
+                }
+            });
+            
+            coverArea.appendChild(miniBtn);
+        });
+    }
+
+    function initGlobalButton() {
+        if (!currentPlatform.isDetailPage()) return;
+        if (document.getElementById('ai-global-btn')) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'ai-global-btn'; btn.innerHTML = '🤖 发送给 AI 总结';
+        btn.style.cssText = `position: fixed; right: 30px; bottom: 120px; z-index: 999999; padding: 12px 24px; font-size: 16px; font-weight: bold; color: #fff; background-color: rgba(251, 114, 153, 0.9); border: none; border-radius: 8px; cursor: pointer; box-shadow: 0 4px 12px rgba(251, 114, 153, 0.4);`;
+        btn.onclick = () => {
+            const directUrl = currentPlatform.getDirectUrl(null);
+            const title = currentPlatform.getDetailTitle();
+            const finalUrl = currentPlatform.getCleanUrl(window.location.href);
+
+            if (directUrl && finalUrl) {
+                sendTaskToLocal("direct_url", finalUrl + "|||" + directUrl, title, btn, false);
+            } else if (finalUrl) {
+                sendTaskToLocal("url", finalUrl, title, btn, false);
+            }
+        };
+        document.body.appendChild(btn);
+    }
+
+    // ================= 4. 跨域遥控时间跳转引擎 =================
+    function checkAndSeekVideo() {
+        const urlParams = new URLSearchParams(window.location.search);
+        const seekTime = urlParams.get('ai_seek');
+
+        if (seekTime) {
+            const timeInSeconds = parseFloat(seekTime);
+            if (!isNaN(timeInSeconds)) {
+                console.log(`[AI 助手] 收到跨域跳转指令，目标时间: ${timeInSeconds}秒`);
+
+                let attempts = 0;
+                const seekInterval = setInterval(() => {
+                    attempts++;
+                    const video = document.querySelector('video');
+                    if (video && video.readyState >= 1) {
+                        video.currentTime = timeInSeconds;
+                        video.play().catch(e => console.warn("[AI 助手] 浏览器自动播放安全策略拦截，需手动点击播放", e));
+                        clearInterval(seekInterval);
+                        console.log(`[AI 助手] 成功劫持播放器，已跳转至 ${timeInSeconds}秒`);
+                    }
+                    if (attempts > 40) clearInterval(seekInterval);
+                }, 500);
+            }
+        }
+    }
+
+    // ================= 5. 生命周期挂载 =================
+    window.addEventListener('load', () => {
+        initGlobalButton();
+        injectCardButtons();
+        checkAndSeekVideo();
+    });
+
+    let timeout;
+    new MutationObserver((mutations) => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => {
+            if(mutations.some(m => m.addedNodes.length > 0)) {
+                injectCardButtons();
+                initGlobalButton();
+            }
+        }, 300);
+    }).observe(document.body, { childList: true, subtree: true });
+
+})();
