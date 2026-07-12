@@ -1,17 +1,19 @@
-# Web 框架与服务器 (调度中心)
-fastapi
-uvicorn
-pydantic
+# ================= Web 界面与本地 API =================
+streamlit>=1.37.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.6.0
+requests>=2.31.0
+openai>=1.0.0
 
-# 音频转录引擎 (Whisper Worker)
-faster-whisper
+# ================= 视频与音频下载 =================
+# 包含常用依赖和 curl-cffi 浏览器指纹模拟支持
+yt-dlp[default,curl-cffi]
 
-# 大模型接口与网络请求 (总结与通信)
-openai
-requests
+# ================= Whisper 语音识别 =================
+faster-whisper>=1.0.0
+huggingface-hub>=0.20.0
 
-# 视频/音频下载器 (Worker)
-yt-dlp
-
-# 前端交互界面 (Streamlit App)
-streamlit
+# ================= AI 人声分离 =================
+# 油猴 V6.3 提交任务时会默认开启人声分离，因此本项目默认安装 GPU 版。
+audio-separator[gpu]
