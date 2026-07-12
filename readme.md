@@ -916,50 +916,10 @@ yt-dlp 官方项目：
 
 - https://github.com/yt-dlp/yt-dlp
 
----
-
-# 十六、建议的 `.gitignore`
-
-建议在 GitHub 项目根目录创建 `.gitignore`：
-
-```gitignore
-# 登录凭据
-cookies.txt
-
-# Python 缓存
-__pycache__/
-*.pyc
-
-# 本地任务和内容
-tasks.db
-srt_vault/
-local_uploads/
-video_downloads/
-
-# 临时文件
-*.tmp
-*.wav
-
-# 编辑器和系统文件
-.vscode/
-.idea/
-.DS_Store
-Thumbs.db
-```
-
-不要将下面这些内容提交到公开仓库：
-
-- `cookies.txt`
-- 私人视频
-- 自动生成的字幕和笔记
-- `tasks.db`
-- 本地大模型文件
-- Whisper 模型文件
-- 包含真实 API Key 的配置
 
 ---
 
-# 十七、隐私与版权说明
+# 十六、隐私与版权说明
 
 - 本项目默认在本地处理音频、字幕和视频文件。
 - 如果使用在线大模型 API，字幕内容会发送给对应的 API 服务商。
@@ -1003,8 +963,7 @@ Thumbs.db
 
 ---
 
-如果程序运行异常，请优先复制启动黑框中的完整错误信息，而不是只截图网页提示。后台日志通常会明确显示问题发生在下载、音频处理、Whisper 转录还是大模型总结阶段。
-
+如果程序运行异常，请优先复制启动黑框中的完整错误信息，而不是只截图网页提示。后台日志通常会明确显示问题发生在下载、音频处理、Whisper 转录还是大模型总结阶段。可以将错误日志及程序源码发给AI进行故障排查。
 
 
 ---
