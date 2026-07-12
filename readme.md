@@ -43,6 +43,7 @@
 ├─ worker.py             # 下载、任务调度、首次总结与视频归档
 ├─ whisper_worker.py     # 音频处理、人声分离与 Whisper 转录
 ├─ launcher.py           # 一键启动全部服务
+├─ requirements.txt      # Python 依赖清单
 ├─ 油猴V6.3.txt          # B站、抖音网页端油猴脚本
 ├─ cookies.txt           # 用户自行准备，不要上传到 GitHub
 └─ README.md
@@ -139,28 +140,33 @@ python -m pip install --upgrade pip
 
 # 三、安装 Python 依赖
 
-在 PowerShell 或 CMD 中执行：
+项目根目录已经提供 `requirements.txt`。打开 PowerShell 或 CMD，进入项目目录后执行：
 
 ```powershell
-python -m pip install fastapi "uvicorn[standard]" pydantic streamlit requests openai faster-whisper huggingface-hub
+python -m pip install --upgrade pip
+python -m pip install --upgrade -r requirements.txt
 ```
 
-安装最新版 `yt-dlp`、默认组件和浏览器指纹模拟组件：
+`requirements.txt` 会安装：
+
+- Streamlit 网页界面
+- FastAPI、Uvicorn 和 Pydantic
+- OpenAI 兼容接口客户端
+- yt-dlp 与 curl-cffi 浏览器指纹模拟组件
+- Faster-Whisper
+- Hugging Face 模型下载工具
+- GPU 版 Audio Separator 人声分离组件
+
+> [!IMPORTANT]
+> 油猴 V6.3 提交任务时会强制发送 `use_vocal_separation: true`，因此准备使用油猴插件的用户必须安装 `audio-separator[gpu]`。它已经包含在本项目的 `requirements.txt` 中。
+>
+> `requirements.txt` 只负责 Python 包。FFmpeg、NVIDIA 驱动、CUDA、cuDNN、Whisper 模型、`Kim_Vocal_2.onnx`、LM Studio 和 `cookies.txt` 仍需按照后续章节单独准备。
+
+如果 B 站或抖音后来因网站接口更新而无法解析，可以单独把 yt-dlp 更新到预发布版本：
 
 ```powershell
 python -m pip install --upgrade --pre "yt-dlp[default,curl-cffi]"
 ```
-
-安装 GPU 版人声分离组件：
-
-```powershell
-python -m pip install "audio-separator[gpu]"
-```
-
-> [!IMPORTANT]
-> 油猴 V6.3 提交任务时会强制发送 `use_vocal_separation: true`，因此准备使用油猴插件的用户必须安装 `audio-separator[gpu]`。
->
-> 只通过网页导入本地文件、并且不勾选“AI 深度降噪”的用户，可以不安装人声分离组件。
 
 安装完成后可检查：
 
@@ -968,7 +974,7 @@ Thumbs.db
 
 - [ ] Python 3.10 或 3.11 可以正常运行
 - [ ] `python -m pip` 可以正常使用
-- [ ] Python 依赖已经安装
+- [ ] 已执行 `python -m pip install --upgrade -r requirements.txt`
 - [ ] `yt-dlp[default,curl-cffi]` 已安装
 - [ ] FFmpeg 已加入 `PATH`
 - [ ] `nvidia-smi` 正常
@@ -998,6 +1004,7 @@ Thumbs.db
 ---
 
 如果程序运行异常，请优先复制启动黑框中的完整错误信息，而不是只截图网页提示。后台日志通常会明确显示问题发生在下载、音频处理、Whisper 转录还是大模型总结阶段。
+
 
 
 ---
