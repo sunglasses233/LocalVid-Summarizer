@@ -5,9 +5,23 @@ import re
 import tempfile
 import subprocess
 import sys
+import threading
+from urllib.parse import urlparse
 import db
 import requests
-from openai import OpenAI
+from llm_settings import create_llm_client, load_llm_settings
+from subtitle_correction import (
+    correct_srt_with_llm,
+    load_persisted_correction,
+    persist_corrected_srt,
+)
+from summary_generation import (
+    build_summary_messages,
+    classify_summary_profile,
+    fallback_summary_route,
+    limit_transcript_to_complete_segments,
+    resolve_summary_char_limit,
+)
 
 # ================= 统一配置 =================
 from config import (
@@ -16,15 +30,35 @@ from config import (
     COOKIES_FILE,
     DEFAULT_USE_VOCAL_SEPARATION,
     DOWNLOAD_MAX_HEIGHT,
-    LLM_API_KEY,
-    LLM_BASE_URL,
-    LLM_TEMPERATURE,
     LOCAL_UPLOADS_DIR,
-    MAX_CHARS_LIMIT,
-    MODEL_NAME,
     SRT_VAULT_DIR,
     WHISPER_MODEL_NAME,
 )
+
+WORKER_IDLE_SECONDS = 3
+LLM_PROGRESS_INTERVAL_SECONDS = 1.5
+CORRECTION_MIN_PROGRESS = 5
+CORRECTION_MAX_PROGRESS = 25
+LLM_MIN_PROGRESS = 38
+LLM_MAX_PROGRESS = 95
+YTDLP_BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+BILIBILI_REFERER = "https://www.bilibili.com/"
+
+VIDEO_METADATA_TEXT_LIMIT = 2000
+VIDEO_STAT_FIELDS = (
+    "like_count",
+    "comment_count",
+    "collect_count",
+    "share_count",
+    "forward_count",
+    "download_count",
+    "play_count",
+)
+SPEAKER_LABEL_PATTERN = re.compile(r"^(?:说话人\d+|其他声音|说话人未知)$")
 
 # ================= 工具函数 =================
 def generate_srt_string(subtitles):
@@ -33,13 +67,172 @@ def generate_srt_string(subtitles):
     for sub in subtitles:
         srt_lines.append(str(sub.get('id', '')))
         srt_lines.append(f"{sub.get('start_time', '00:00:00,000')} --> {sub.get('end_time', '00:00:00,000')}")
-        srt_lines.append(str(sub.get('text', '')))
+        text = str(sub.get('text', ''))
+        speaker = str(sub.get('speaker') or '').strip()
+        if speaker and SPEAKER_LABEL_PATTERN.fullmatch(speaker):
+            text = f"[{speaker}] {text}".rstrip()
+        srt_lines.append(text)
         srt_lines.append("") 
     return "\n".join(srt_lines)
+
+
+def normalize_primary_speaker_count(value):
+    normalized = str(value if value is not None else "2").strip().lower()
+    if normalized in {"auto", "自动", "-1"}:
+        return -1
+    try:
+        count = int(normalized)
+    except (TypeError, ValueError):
+        return 2
+    return count if 2 <= count <= 20 else 2
+
+
+def build_whisper_command(
+    media_path,
+    output_path,
+    use_denoise=False,
+    use_speaker_diarization=False,
+    primary_speakers=2,
+):
+    command = [
+        sys.executable,
+        str(BASE_DIR / "whisper_worker.py"),
+        "--input",
+        str(media_path),
+        "--output",
+        str(output_path),
+        "--model",
+        WHISPER_MODEL_NAME,
+    ]
+    if use_denoise:
+        command.append("--denoise")
+    if use_speaker_diarization:
+        command.extend(
+            ["--diarize", "--speakers", str(normalize_primary_speaker_count(primary_speakers))]
+        )
+    return command
 
 def sanitize_filename(title):
     safe_title = re.sub(r'[\\/*?:"<>|]', "", title)
     return safe_title.strip()[:100]
+
+
+def parse_task_options(task):
+    value = task.get("options") if isinstance(task, dict) else None
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else {}
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def is_bilibili_url(url):
+    try:
+        hostname = (urlparse(str(url or "")).hostname or "").lower()
+    except ValueError:
+        return False
+    return hostname == "b23.tv" or hostname == "bilibili.com" or hostname.endswith(
+        ".bilibili.com"
+    )
+
+
+def build_yt_dlp_network_options(url):
+    headers = {"User-Agent": YTDLP_BROWSER_USER_AGENT}
+    if is_bilibili_url(url):
+        headers["Referer"] = BILIBILI_REFERER
+
+    options = {"http_headers": headers}
+    if COOKIES_FILE.exists():
+        options["cookiefile"] = str(COOKIES_FILE)
+    return options
+
+
+def format_yt_dlp_download_error(url, error):
+    message = str(error)
+    if is_bilibili_url(url) and "HTTP Error 412" in message:
+        return (
+            "B站拒绝了下载请求（HTTP 412）。请升级 yt-dlp 后重新启动软件；"
+            "若仍失败，请重新导出已登录 B站 的 cookies.txt，或稍后重试。"
+            f"原始错误：{message}"
+        )
+    return message
+
+
+def _metadata_text(value, limit=VIDEO_METADATA_TEXT_LIMIT):
+    return str(value or "").strip()[:limit]
+
+
+def _metadata_number(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0 or number != number or number in (float("inf"), float("-inf")):
+        return None
+    return int(number) if number.is_integer() else number
+
+
+def _without_empty_values(data):
+    return {
+        key: value
+        for key, value in data.items()
+        if value not in (None, "", {}, [])
+    }
+
+
+def normalize_video_metadata(value):
+    if not isinstance(value, dict):
+        return {}
+
+    author = value.get("author") if isinstance(value.get("author"), dict) else {}
+    statistics = (
+        value.get("statistics") if isinstance(value.get("statistics"), dict) else {}
+    )
+    media = value.get("media") if isinstance(value.get("media"), dict) else {}
+
+    normalized_stats = {}
+    for field in VIDEO_STAT_FIELDS:
+        number = _metadata_number(statistics.get(field))
+        if number is None or (field == "play_count" and number <= 0):
+            continue
+        normalized_stats[field] = number
+
+    normalized = {
+        "schema_version": 1,
+        "platform": _metadata_text(value.get("platform"), 32),
+        "video_id": _metadata_text(value.get("video_id"), 128),
+        "title": _metadata_text(value.get("title")),
+        "source_url": _metadata_text(value.get("source_url"), 4000),
+        "author": _without_empty_values(
+            {
+                "name": _metadata_text(author.get("name"), 500),
+                "user_id": _metadata_text(author.get("user_id"), 256),
+                "sec_uid": _metadata_text(author.get("sec_uid"), 512),
+                "follower_count": _metadata_number(author.get("follower_count")),
+                "total_favorited": _metadata_number(author.get("total_favorited")),
+            }
+        ),
+        "published_at": _metadata_text(value.get("published_at"), 64),
+        "published_at_unix": _metadata_number(value.get("published_at_unix")),
+        "captured_at": _metadata_text(value.get("captured_at"), 64),
+        "statistics": normalized_stats,
+        "media": _without_empty_values(
+            {
+                "duration_seconds": _metadata_number(media.get("duration_seconds")),
+                "width": _metadata_number(media.get("width")),
+                "height": _metadata_number(media.get("height")),
+                "quality": _metadata_text(media.get("quality"), 64),
+                "cover_url": _metadata_text(media.get("cover_url"), 4000),
+            }
+        ),
+    }
+    return _without_empty_values(normalized)
 
 
 def download_high_res_video(url, save_dir, base_name):
@@ -52,20 +245,19 @@ def download_high_res_video(url, save_dir, base_name):
         'format': format_str,
         'outtmpl': os.path.join(save_dir, f"{base_name}.%(ext)s"),
         'merge_output_format': 'mp4',
-        'cookiefile': str(COOKIES_FILE), # 依赖最新 cookies 突破 B站 1080P 限制
         'quiet': False,
         'no_warnings': True,
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        }
+        **build_yt_dlp_network_options(url),
     }
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.extract_info(url, download=True)
             return True
-    except Exception as e:
-        raise Exception(f"下载引擎报错: {e}")
+    except Exception as error:
+        raise Exception(
+            f"下载引擎报错: {format_yt_dlp_download_error(url, error)}"
+        ) from error
 
 
 def extract_pure_text_from_srt(srt_content):
@@ -124,21 +316,20 @@ def download_audio_from_url(url, task_id):
         'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
-        'cookiefile': str(COOKIES_FILE),
-        # 伪装常见的 User-Agent
-        'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        }
+        **build_yt_dlp_network_options(url),
     }
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        expected_filename = ydl.prepare_filename(info)
-        if not os.path.exists(expected_filename):
-            for ext in ['webm', 'm4a', 'mp3', 'mp4']:
-                alt_path = expected_filename.rsplit('.', 1)[0] + f".{ext}"
-                if os.path.exists(alt_path): return alt_path
-        return expected_filename
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            expected_filename = ydl.prepare_filename(info)
+            if not os.path.exists(expected_filename):
+                for ext in ['webm', 'm4a', 'mp3', 'mp4']:
+                    alt_path = expected_filename.rsplit('.', 1)[0] + f".{ext}"
+                    if os.path.exists(alt_path): return alt_path
+            return expected_filename
+    except Exception as error:
+        raise Exception(format_yt_dlp_download_error(url, error)) from error
 
 # [编程大师2.0 新增]：极速直链下载器（前端提供解密后的 CDN 裸链接，彻底绕过反爬）
 def download_direct_media(url, task_id):
@@ -194,13 +385,22 @@ def process_whisper_phase(task):
         _, temp_json_path = tempfile.mkstemp(suffix=".json")
         
         # [编程大师2.0 新增]：解析动态配置
-        options_str = task.get('options')
-        task_options = json.loads(options_str) if options_str else {}
+        task_options = parse_task_options(task)
         use_denoise = task_options.get('use_vocal_separation', DEFAULT_USE_VOCAL_SEPARATION)
+        use_speaker_diarization = bool(
+            task_options.get("use_speaker_diarization", False)
+        )
+        primary_speakers = normalize_primary_speaker_count(
+            task_options.get("speaker_count", 2)
+        )
         
-        command = [sys.executable, str(BASE_DIR / "whisper_worker.py"), "--input", temp_media_path, "--output", temp_json_path, "--model", WHISPER_MODEL_NAME]
-        if use_denoise:
-            command.append("--denoise")
+        command = build_whisper_command(
+            temp_media_path,
+            temp_json_path,
+            use_denoise=use_denoise,
+            use_speaker_diarization=use_speaker_diarization,
+            primary_speakers=primary_speakers,
+        )
         custom_env = os.environ.copy()
         custom_env["PYTHONIOENCODING"], custom_env["PYTHONUNBUFFERED"] = "utf-8", "1"
         
@@ -212,14 +412,29 @@ def process_whisper_phase(task):
             if not line: continue
             
             # [编程大师2.0 修复]：将底层的非进度条日志，透传打印到主控制台！
-            if not line.startswith("[PROGRESS]"):
+            if not line.startswith(("[PROGRESS]", "[DIARIZATION_PROGRESS]")):
                 print(line)
                 
             if line.startswith("[PROGRESS]"):
                 try:
                     pct = float(line.split()[1])
                     if time.time() - last_update > 2.0:
-                        db.update_task_status(task_id, "transcribing", int(10 + pct * 0.89))
+                        if use_speaker_diarization:
+                            mapped_progress = 99 if pct >= 100 else int(10 + pct * 0.69)
+                        else:
+                            mapped_progress = int(10 + pct * 0.89)
+                        db.update_task_status(task_id, "transcribing", mapped_progress)
+                        last_update = time.time()
+                except: pass
+            elif line.startswith("[DIARIZATION_PROGRESS]"):
+                try:
+                    pct = float(line.split()[1])
+                    if time.time() - last_update > 2.0:
+                        db.update_task_status(
+                            task_id,
+                            "transcribing",
+                            int(80 + pct * 0.19),
+                        )
                         last_update = time.time()
                 except: pass
 
@@ -249,22 +464,136 @@ def process_whisper_phase(task):
             try: os.unlink(temp_json_path)
             except: pass
 
-# ================= 阶段 2：脑力总结 (大模型) =================
-# ================= 阶段 2：脑力总结 (大模型) =================
+# ================= 阶段 2：字幕校对与总结 (大模型) =================
+def get_stream_delta_content(chunk):
+    choices = getattr(chunk, "choices", None)
+    if not choices:
+        return ""
+    delta = getattr(choices[0], "delta", None)
+    if delta is None:
+        return ""
+    return getattr(delta, "content", None) or ""
+
+def call_llm_summary(task_id, title, client, settings, messages):
+    chunks = []
+    progress = LLM_MIN_PROGRESS
+    last_update = time.time()
+
+    try:
+        response_stream = client.chat.completions.create(
+            model=settings["model"],
+            messages=messages,
+            temperature=settings["temperature"],
+            stream=True,
+        )
+        db.update_task_status(task_id, "summarizing", progress)
+        for chunk in response_stream:
+            content = get_stream_delta_content(chunk)
+            if content:
+                chunks.append(content)
+
+            now = time.time()
+            if now - last_update >= LLM_PROGRESS_INTERVAL_SECONDS:
+                progress = min(LLM_MAX_PROGRESS, progress + 2)
+                db.update_task_status(task_id, "summarizing", progress)
+                last_update = now
+
+        db.update_task_status(task_id, "summarizing", LLM_MAX_PROGRESS)
+        return "".join(chunks)
+    except Exception:
+        if chunks:
+            raise
+        print(f"[{title}] 流式总结失败，尝试普通 API 调用。")
+
+    db.update_task_status(task_id, "summarizing", 45)
+    response = client.chat.completions.create(
+        model=settings["model"],
+        messages=messages,
+        temperature=settings["temperature"],
+    )
+    db.update_task_status(task_id, "summarizing", 90)
+    return response.choices[0].message.content or ""
+
+
+def run_subtitle_correction(
+    task_id,
+    title,
+    client,
+    settings,
+    srt_content,
+    final_srt_path,
+):
+    stop_event = threading.Event()
+    progress_lock = threading.Lock()
+    progress_state = {"value": CORRECTION_MIN_PROGRESS}
+
+    def publish_progress(value):
+        bounded = max(CORRECTION_MIN_PROGRESS, min(CORRECTION_MAX_PROGRESS, int(value)))
+        with progress_lock:
+            progress_state["value"] = max(progress_state["value"], bounded)
+            current_value = progress_state["value"]
+        db.update_task_status(task_id, "correcting", current_value)
+
+    def correction_progress(stage, current, total, message):
+        if stage == "completed":
+            publish_progress(CORRECTION_MAX_PROGRESS)
+            return
+        fraction = (current / total) if total else 0
+        span = CORRECTION_MAX_PROGRESS - CORRECTION_MIN_PROGRESS
+        publish_progress(CORRECTION_MIN_PROGRESS + int(span * fraction))
+
+    def heartbeat():
+        while not stop_event.wait(LLM_PROGRESS_INTERVAL_SECONDS):
+            with progress_lock:
+                next_value = min(
+                    CORRECTION_MAX_PROGRESS - 1,
+                    progress_state["value"] + 1,
+                )
+            publish_progress(next_value)
+
+    publish_progress(CORRECTION_MIN_PROGRESS)
+    heartbeat_thread = threading.Thread(
+        target=heartbeat,
+        name=f"SubtitleCorrectionProgress-{task_id[:8]}",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+    try:
+        result = correct_srt_with_llm(
+            srt_content=srt_content,
+            title=title,
+            client=client,
+            settings=settings,
+            progress=correction_progress,
+        )
+        raw_backup_path = persist_corrected_srt(
+            final_srt_path,
+            srt_content,
+            result.corrected_srt,
+        )
+        publish_progress(CORRECTION_MAX_PROGRESS)
+        return result, raw_backup_path
+    finally:
+        stop_event.set()
+        heartbeat_thread.join(timeout=2)
+
+
 def process_llm_phase(task):
     task_id, title = task['id'], task['title']
     source_type, source_path = task['source_type'], task['source_path']
     final_srt_path = get_target_srt_path(title, task_id)
     
     try:
-        db.update_task_status(task_id, "summarizing", 0)
-        print(f"[{title}] 🤖 开始大模型自动总结并准备持久化元数据...")
+        db.update_task_status(task_id, "correcting", 0)
+        print(f"[{title}] 📝 开始结合上下文校对字幕，随后自动总结...")
         
         if not os.path.exists(final_srt_path):
             raise Exception("未找到对应的字幕文件进行总结")
             
+        db.update_task_status(task_id, "correcting", 2)
         with open(final_srt_path, 'r', encoding='utf-8') as f:
             srt_content = f.read()
+        db.update_task_status(task_id, "correcting", 4)
             
         # 🛡️ 防御性隔离 1：在执行任何不可控的 API 请求前，先将前端刚需的 UI 基础数据解析完毕
         display_url = ""
@@ -273,73 +602,115 @@ def process_llm_phase(task):
         elif source_type == "direct_url":
             display_url = source_path.split("|||")[0] if "|||" in source_path else source_path
 
+        task_options = parse_task_options(task)
+        video_metadata = normalize_video_metadata(task_options.get("video_metadata"))
+
         # 🛡️ 防御性隔离 2：防止重试机制引发的重复追加脏数据
         if "====================== AI_CHAT_HISTORY ======================" in srt_content:
             print(f"[{title}] ⚠️ 检测到该字幕已包含元数据，跳过写入，直接完结任务。")
             db.update_task_status(task_id, "completed", 100)
             return
 
+        active_llm_settings = load_llm_settings()
+        client = None
+        correction_metadata = {
+            "status": "fallback",
+            "model": active_llm_settings.get("model", ""),
+            "changed_count": 0,
+            "total_segments": 0,
+            "raw_backup": "",
+        }
+        try:
+            correction_result = load_persisted_correction(
+                final_srt_path,
+                active_llm_settings.get("model", ""),
+            )
+            recovered = correction_result is not None
+            if recovered:
+                raw_backup_path = final_srt_path + ".raw.bak"
+                db.update_task_status(task_id, "correcting", CORRECTION_MAX_PROGRESS)
+                print(f"[{title}] ♻️ 检测到已落盘的校对结果，跳过重复 API 调用。")
+            else:
+                client = create_llm_client(active_llm_settings)
+                correction_result, raw_backup_path = run_subtitle_correction(
+                    task_id,
+                    title,
+                    client,
+                    active_llm_settings,
+                    srt_content,
+                    final_srt_path,
+                )
+
+            srt_content = correction_result.corrected_srt
+            correction_metadata = {
+                "status": "completed",
+                "model": correction_result.model,
+                "changed_count": correction_result.changed_count,
+                "total_segments": correction_result.total_segments,
+                "raw_backup": os.path.basename(str(raw_backup_path)),
+                "recovered_after_restart": recovered,
+            }
+            print(
+                f"[{title}] ✅ 字幕语义校对完成，共修正 "
+                f"{correction_result.changed_count} 处。"
+            )
+        except Exception as correction_error:
+            correction_metadata["error"] = str(correction_error)[:500]
+            print(f"[{title}] ⚠️ 字幕校对失败，使用原始字幕继续总结: {correction_error}")
+
         pure_text = extract_pure_text_from_srt(srt_content)
-        if len(pure_text) > MAX_CHARS_LIMIT:
-            pure_text = pure_text[:MAX_CHARS_LIMIT] + "...(为防止显存溢出，后续内容已截断)"
-            
-        # [编程大师2.0 终极版]：系统强认知约束
-        sys_prompt = (
-            f"你是一个专业的视频内容分析助手。以下是带有时间戳标记的视频完整字幕文本：\n\n"
-            f"{pure_text}\n\n"
-            f"【核心约束指令】：\n"
-            f"1. 请根据上述文本准确回答用户的问题。\n"
-            f"2. 文本中方括号内的内容（如 [01:30]）代表时间戳。在引用信息时，**必须**附带对应的时间戳。\n"
-            f"3. 输出的时间戳格式必须严格包裹在圆括号内，并【绝对忠实于原文的时间层级】！如果原文带有小时（如 [01:06:48]），就必须输出 (01:06:48)，绝对不允许擅自删减成 (06:48)！\n"
-            f"4. 如果问题超出文本范围，请如实告知。"
+        transcript_limit = limit_transcript_to_complete_segments(
+            pure_text,
+            resolve_summary_char_limit(active_llm_settings),
         )
-
-        # [编程大师2.0 终极版]：动态领域路由 + 强时间锚点
-        user_prompt = """# 角色设定
-你是一个全能型、深度的视频内容分析引擎。你的任务是将未经人工校对、带有明显口语化的 ASR 转录文本，结构化提炼为高信息密度、逻辑严密、细节丰满的深度笔记。
-
-# 核心处理原则 (Strict Rules)
-1. 自动降噪：静默修复同音错字，过滤情绪化发泄和广告推销。
-2. 提升信息密度：必须保留核心论证过程、数据指标和生动案例。宁可详尽，不可遗漏关键逻辑链（建议 800-1500 字）。
-3. 逻辑重构：绝不按时间轴流水账总结。必须打破原文顺序，按内在逻辑重新排列。
-
-# 执行步骤 (Workflow)
-严格按照以下 Markdown 结构输出，必须正确使用回车换行！
-
-### 🎯 核心结论 (TL;DR)
-- 用 2-3 句话一针见血地概括视频的最核心价值或最终结论。
-
-### 🧠 深度逻辑解构 (必须详尽展开)
-（请在后台静默判断视频领域，并**只选择以下最匹配的一个框架**进行输出。绝对不要把未选中的框架提示词输出出来！）
-
-- **如果是【数码测评/硬件】**：使用 Markdown 表格横向对比核心参数与优缺点；分点展开实测触发场景与购买建议。
-- **如果是【前沿科学/科普】**：深入浅出解释底层工作原理；详述突破了什么历史局限；列出现阶段的缺陷或未解之谜。
-- **如果是【心理/情感/人际】**：深度剖析矛盾本质；拆解背后的心理学动因；给出切实可行的应对策略或话术示范。
-- **如果是【金融商业/硬核分析】**：提取所有关键数据、金额、比例作为论据；推演利弊影响及行业传导链条。
-- **如果是【通用干货/方法论】**：明确痛点；详述解决问题的具体步骤（Step-by-Step），包含动作和避坑指南。
-
-### 📂 案例与论据库
-- **核心案例复盘**：详细提取 1-2 个核心案例（背景、行动、结果），绝对不能一笔带过。
-- **关键数据/公式**：列出文本中提到的重要数据模型。
-
-### 💡 关键细节与金句
-- 提取 3 个最引人深思的金句或反共识观点。
-- 汇总需要避坑的“易错点”或“盲区”。
-
-# 🔴 【最高排版纪律】（违规将导致系统崩溃，请绝对遵守）
-1. **时间锚点覆盖**：在上述每一个列表要点、表格行、案例和金句的末尾，【必须】附带原文本中的具体时间戳！
-2. **格式红线**：时间戳必须严格包在一个单圆括号内，并忠实于原文长度！有小时必须带小时（如 (01:06:48)），没小时带分钟（如 (01:30)），时间段请用 (01:06:48-01:08:17)。绝对不允许擅自删减时间位数！
-3. **表格规范**：如果输出表格，必须严格正确换行，不要挤在同一行。"""
-
-        messages = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}]
+        pure_text = transcript_limit.text
+        if transcript_limit.truncated:
+            print(
+                f"[{title}] ⚠️ 字幕共 {transcript_limit.original_chars:,} 字符，"
+                f"已按 {transcript_limit.limit:,} 字符上限保留到 "
+                f"{transcript_limit.last_timestamp or '最近完整段落'}。"
+            )
+            
+        # 先识别视频的内容组织形式，再使用对应的总结结构。
+        db.update_task_status(task_id, "summarizing", 28)
+        try:
+            if client is None:
+                client = create_llm_client(active_llm_settings)
+            summary_route = classify_summary_profile(
+                title,
+                pure_text,
+                client,
+                active_llm_settings,
+            )
+        except Exception as route_error:
+            summary_route = fallback_summary_route(route_error)
+        if summary_route.source == "fallback":
+            print(
+                f"[{title}] ⚠️ 总结类型识别失败，使用通用模板: "
+                f"{summary_route.error}"
+            )
+        else:
+            print(
+                f"[{title}] 🧭 已识别为{summary_route.label} "
+                f"(置信度 {summary_route.confidence:.0%})"
+            )
+        db.update_task_status(task_id, "summarizing", 36)
+        messages = build_summary_messages(title, pure_text, summary_route)
         llm_success = False
         
         # 🛡️ 防御性隔离 3：将网络调用完全包裹在内部 Try 块中
         try:
-            client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
-            response = client.chat.completions.create(model=MODEL_NAME, messages=messages, temperature=LLM_TEMPERATURE)
-            ai_reply = response.choices[0].message.content
-            messages.append({"role": "assistant", "content": ai_reply})
+            if client is None:
+                client = create_llm_client(active_llm_settings)
+            db.update_task_status(task_id, "summarizing", 37)
+            ai_reply = call_llm_summary(task_id, title, client, active_llm_settings, messages)
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": ai_reply,
+                    "summary_profile": summary_route.to_metadata(),
+                }
+            )
             llm_success = True
             print(f"[{title}] ✨ 大模型总结完毕！")
         except Exception as llm_error:
@@ -353,7 +724,9 @@ def process_llm_phase(task):
             "source_url": display_url, 
             "collection": "默认收藏夹", 
             "notes": "",              
-            "history": [m for m in messages if m["role"] != "system"]
+            "history": [m for m in messages if m["role"] != "system"],
+            "subtitle_correction": correction_metadata,
+            "video_metadata": video_metadata,
         }
         metadata_json = json.dumps(metadata_to_save, ensure_ascii=False, indent=2)
         
@@ -362,17 +735,15 @@ def process_llm_phase(task):
             f.write(metadata_json)
             
 # ================= [编程大师2.0 新增]：后台静默物理归档引擎 =================
-        options_str = task.get('options')
-        task_options = json.loads(options_str) if options_str else {}
         # 逻辑：前端传来的配置优先级最高，如果没有传（比如通过油猴发来的），则听从 worker.py 的全局设定
         should_download = task_options.get('auto_download', AUTO_DOWNLOAD_VIDEO)
         
         if should_download and display_url:
-            print(f"[{title}] 📥 触发自动归档设定，正在后台静默拉取 1080P 原片...")
+            print(f"[{title}] 📥 触发自动归档设定，正在后台静默拉取 {DOWNLOAD_MAX_HEIGHT}P 原片...")
             try:
                 base_name = os.path.basename(final_srt_path).rsplit('.', 1)[0]
                 download_high_res_video(display_url, SRT_VAULT_DIR, base_name)
-                print(f"[{title}] ✅ 1080P 原片后台物理归档成功！")
+                print(f"[{title}] ✅ {DOWNLOAD_MAX_HEIGHT}P 原片后台物理归档成功！")
             except Exception as e:
                 print(f"[{title}] ⚠️ 自动下载原片失败: {e}")
         
@@ -382,31 +753,55 @@ def process_llm_phase(task):
             print(f"[{title}] 🛡️ 兜底机制生效：已安全写入源链接元数据，前端 UI 功能不受任何影响！")
         
     except Exception as e:
-        print(f"[{title}] ❌ 总结阶段发生严重外层异常: {e}")
+        print(f"[{title}] ❌ 大模型校对/总结阶段发生严重外层异常: {e}")
         db.update_task_status(task_id, "completed", 100)
         
 # ================= 调度引擎 =================
-def run_worker_loop():
-    print("🚀 [Worker] 智能调度进程已启动，等待派单...")
+def fetch_next_task(status):
+    with db.get_conn() as conn:
+        cursor = conn.execute(
+            "SELECT * FROM video_tasks WHERE status = ? ORDER BY created_at ASC LIMIT 1",
+            (status,),
+        )
+        task = cursor.fetchone()
+        return dict(task) if task else None
+
+def run_whisper_loop():
+    print("[Whisper Worker] 转录线程已启动，等待 pending 任务...")
     while True:
         try:
-            with db.get_conn() as conn:
-                cursor = conn.execute("SELECT * FROM video_tasks WHERE status = 'pending' ORDER BY created_at ASC LIMIT 1")
-                pending_task = cursor.fetchone()
-                if pending_task:
-                    process_whisper_phase(dict(pending_task))
-                    continue 
-                
-                cursor = conn.execute("SELECT * FROM video_tasks WHERE status = 'awaiting_llm' ORDER BY created_at ASC LIMIT 1")
-                llm_task = cursor.fetchone()
-                if llm_task:
-                    process_llm_phase(dict(llm_task))
-                    continue
-                    
-            time.sleep(3) 
+            task = fetch_next_task("pending")
+            if task:
+                process_whisper_phase(task)
+                continue
+            time.sleep(WORKER_IDLE_SECONDS)
         except Exception as e:
-            print(f"[Worker] 致命错误: {e}")
+            print(f"[Whisper Worker] 调度错误: {e}")
             time.sleep(5)
+
+def run_llm_loop():
+    print("[LLM Worker] API 校对/总结线程已启动，等待 awaiting_llm 任务...")
+    while True:
+        try:
+            task = fetch_next_task("awaiting_llm")
+            if task:
+                process_llm_phase(task)
+                continue
+            time.sleep(WORKER_IDLE_SECONDS)
+        except Exception as e:
+            print(f"[LLM Worker] 调度错误: {e}")
+            time.sleep(5)
+
+def run_worker_loop():
+    print("[Worker] 并行调度已启动：转录线程 1 个，API 校对/总结线程 1 个。")
+    workers = [
+        threading.Thread(target=run_whisper_loop, name="WhisperWorker"),
+        threading.Thread(target=run_llm_loop, name="LLMWorker"),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
 
 if __name__ == "__main__":
     run_worker_loop()

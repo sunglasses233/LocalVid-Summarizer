@@ -1,0 +1,327 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-19T11:45:49+08:00",
+  "release_profile": "windows-x86_64-nvidia-python310",
+  "artifacts": [
+    {
+      "id": "ffmpeg",
+      "required": true,
+      "kind": "archive-tool",
+      "version": "9.0.1-essentials_build",
+      "license": {
+        "spdx": "GPL-3.0-or-later",
+        "source_url": "https://ffmpeg.org/legal.html",
+        "redistribution": "download_only"
+      },
+      "files": [
+        {
+          "id": "archive",
+          "scope": "download",
+          "path": "runtime/downloads/ffmpeg-9.0.1-essentials_build.zip",
+          "size": 111253802,
+          "sha256": "fec81ae03971d9dd4be3ebe02e263bd2ec1d789483f931bdba5f5715e65da2e9",
+          "urls": [
+            "https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.1-essentials_build.zip"
+          ]
+        }
+      ],
+      "install": {
+        "strategy": "zip-strip-single-root",
+        "target": "tools/ffmpeg",
+        "required_executable": "tools/ffmpeg/bin/ffmpeg.exe"
+      }
+    },
+    {
+      "id": "nvidia-cuda-runtime",
+      "required": true,
+      "kind": "archive-runtime",
+      "version": "CUDA12_v3-cuBLAS12.8.4.1-cuDNN9.8.0.87",
+      "license": {
+        "spdx": "LicenseRef-NVIDIA-Software-License-Agreement",
+        "source_url": "https://docs.nvidia.com/cuda/eula/index.html",
+        "redistribution": "download_only_no_redistribution"
+      },
+      "files": [
+        {
+          "id": "archive",
+          "scope": "download",
+          "path": "runtime/downloads/cuBLAS.and.cuDNN_CUDA12_win_v3.7z",
+          "size": 849141159,
+          "sha256": "ec00119dbeec2adff661302883becd004028784031a4547ea1749e7683ffb67f",
+          "urls": [
+            "https://github.com/Purfview/whisper-standalone-win/releases/download/libs/cuBLAS.and.cuDNN_CUDA12_win_v3.7z"
+          ]
+        },
+        {
+          "id": "cublas64-12",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cublas64_12.dll",
+          "size": 113716224,
+          "sha256": "9513540e4ec4c51ee9e7304138c2cc255c29a8c181f9e80c38efa25738becd99",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cublaslt64-12",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cublasLt64_12.dll",
+          "size": 674667520,
+          "sha256": "b199d1ff892a81b7fd3d57ba1781549609b41500b36008fef326038393ad46c7",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cudnn64-9",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cudnn64_9.dll",
+          "size": 265760,
+          "sha256": "0edb24306db36121137a3150ac55015aee174d4582d5b807bd3220180a7a57db",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cudnn-adv64-9",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cudnn_adv64_9.dll",
+          "size": 253583928,
+          "sha256": "631af1130b27b4d14683c7da690dddec8e25ffe3097d498fbba7129faba1601c",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cudnn-cnn64-9",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cudnn_cnn64_9.dll",
+          "size": 4262456,
+          "sha256": "68c9f6bf98a5620a0bb0519c3997800ef2c7cb8979f17a60afcf82d341629c73",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cudnn-engines-precompiled64-9",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cudnn_engines_precompiled64_9.dll",
+          "size": 548927544,
+          "sha256": "59e71b3adae62186d3336ccbda6d0c8b14a3a0ef21694757e2b32e84fa840152",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cudnn-engines-runtime-compiled64-9",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cudnn_engines_runtime_compiled64_9.dll",
+          "size": 25217568,
+          "sha256": "8671c24fc0debbd99c3dca57bfdf657f4c9490e2a009f641cfc2fcf7a1256180",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cudnn-graph64-9",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cudnn_graph64_9.dll",
+          "size": 2239520,
+          "sha256": "22c21907fb2108259cb25738156f4459c12c0a001715bbb6d5aafac150060e85",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cudnn-heuristic64-9",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cudnn_heuristic64_9.dll",
+          "size": 55919648,
+          "sha256": "5378e50729665245fa5abe89c729b782de686675e9bd6319cda1a3165d9492e6",
+          "derived_from": "archive"
+        },
+        {
+          "id": "cudnn-ops64-9",
+          "scope": "installed",
+          "path": "tools/cuda/bin/cudnn_ops64_9.dll",
+          "size": 116958752,
+          "sha256": "080c2bb37e9d1fdd585cdd53fdbb23c0478b99610a19f8bba512b596b1e302fe",
+          "derived_from": "archive"
+        }
+      ],
+      "install": {
+        "strategy": "manual-copy-installed-files",
+        "target": "tools/cuda/bin",
+        "note": "用户自行解压下载包，只复制清单中 scope=installed 的 10 个 DLL；项目不管理解压工具。",
+        "path_policy": "启动 Whisper 子进程时先按绝对路径预加载这 10 个 DLL，再将该目录置于 PATH 最前端；只修改 PATH 不能排除既有 CUDA Toolkit 和包内 DLL 抢先加载。"
+      }
+    },
+    {
+      "id": "whisper-large-v3",
+      "required": true,
+      "kind": "model",
+      "version": "edaa852ec7e145841d8ffdb056a99866b5f0a478",
+      "license": {
+        "spdx": "MIT",
+        "source_url": "https://huggingface.co/Systran/faster-whisper-large-v3/blob/edaa852ec7e145841d8ffdb056a99866b5f0a478/README.md",
+        "redistribution": "download_only"
+      },
+      "files": [
+        {
+          "id": "config",
+          "scope": "installed",
+          "path": "models/whisper/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/config.json",
+          "size": 2394,
+          "sha256": "a9306624f5ec14270a014b647e5c316b6e03a662c369758d1b90697a7b0655b9",
+          "urls": [
+            "https://hf-mirror.com/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/config.json",
+            "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/config.json"
+          ]
+        },
+        {
+          "id": "model",
+          "scope": "installed",
+          "path": "models/whisper/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/model.bin",
+          "size": 3087284237,
+          "sha256": "69f74147e3334731bc3a76048724833325d2ec74642fb52620eda87352e3d4f1",
+          "urls": [
+            "https://hf-mirror.com/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/model.bin",
+            "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/model.bin"
+          ]
+        },
+        {
+          "id": "preprocessor-config",
+          "scope": "installed",
+          "path": "models/whisper/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/preprocessor_config.json",
+          "size": 340,
+          "sha256": "7ccc62c6f2765af1f3b46c00c9b5894426835a05021c8b9c01eecb6dfb542711",
+          "urls": [
+            "https://hf-mirror.com/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/preprocessor_config.json",
+            "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/preprocessor_config.json"
+          ]
+        },
+        {
+          "id": "tokenizer",
+          "scope": "installed",
+          "path": "models/whisper/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/tokenizer.json",
+          "size": 2480617,
+          "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca",
+          "urls": [
+            "https://hf-mirror.com/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/tokenizer.json",
+            "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/tokenizer.json"
+          ]
+        },
+        {
+          "id": "vocabulary",
+          "scope": "installed",
+          "path": "models/whisper/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478/vocabulary.json",
+          "size": 1068114,
+          "sha256": "c69260f2ab26d659b7c398f9a2b2b48ed0df16c3b47d7326782fd9cba71690c1",
+          "urls": [
+            "https://hf-mirror.com/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/vocabulary.json",
+            "https://huggingface.co/Systran/faster-whisper-large-v3/resolve/edaa852ec7e145841d8ffdb056a99866b5f0a478/vocabulary.json"
+          ]
+        }
+      ],
+      "install": {
+        "strategy": "huggingface-snapshot-layout",
+        "ref_file": "models/whisper/models--Systran--faster-whisper-large-v3/refs/main"
+      }
+    },
+    {
+      "id": "speaker-diarization-models",
+      "required": true,
+      "kind": "model-bundle",
+      "version": "segmentation-9403a690_embedding-0743f301",
+      "license": {
+        "spdx": "MIT AND Apache-2.0",
+        "source_url": "https://github.com/modelscope/3D-Speaker/blob/master/LICENSE",
+        "redistribution": "download_only"
+      },
+      "files": [
+        {
+          "id": "segmentation",
+          "scope": "installed",
+          "path": "models/speaker_diarization/segmentation.onnx",
+          "size": 5992913,
+          "sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+          "urls": [
+            "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
+            "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx"
+          ]
+        },
+        {
+          "id": "embedding",
+          "scope": "installed",
+          "path": "models/speaker_diarization/speaker_embedding.onnx",
+          "size": 28281164,
+          "sha256": "aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2",
+          "urls": [
+            "https://hf-mirror.com/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx",
+            "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/0743f301363dec56491a490f6d6cbc9d67f9a3bf/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
+          ]
+        }
+      ],
+      "install": {
+        "strategy": "direct-download"
+      }
+    },
+    {
+      "id": "uvr-model-metadata",
+      "required": false,
+      "kind": "model-metadata",
+      "version": "3826b05b570dbd4fbedbc807758803b35348ba1b",
+      "license": {
+        "spdx": "NOASSERTION",
+        "source_url": "https://github.com/TRvlvr/application_data",
+        "redistribution": "optional_download_only"
+      },
+      "files": [
+        {
+          "id": "download-checks",
+          "scope": "installed",
+          "path": "models/audio_separator/download_checks.json",
+          "size": 28267,
+          "sha256": "d3622e1fa19c161d3cf704927711b453d593a3f1eb0f2e0838c3136907935151",
+          "urls": [
+            "https://raw.githubusercontent.com/TRvlvr/application_data/3826b05b570dbd4fbedbc807758803b35348ba1b/filelists/download_checks.json"
+          ]
+        },
+        {
+          "id": "vr-model-data",
+          "scope": "installed",
+          "path": "models/audio_separator/vr_model_data.json",
+          "size": 4380,
+          "sha256": "6a2021b9aa355c10f845b68c73944d47bd9e1fdf37b8a584b14ce8f88b09bb2f",
+          "urls": [
+            "https://raw.githubusercontent.com/TRvlvr/application_data/3826b05b570dbd4fbedbc807758803b35348ba1b/vr_model_data/model_data_new.json"
+          ]
+        },
+        {
+          "id": "mdx-model-data",
+          "scope": "installed",
+          "path": "models/audio_separator/mdx_model_data.json",
+          "size": 15358,
+          "sha256": "1aca8f9bcc57233bc714029663a9ec2345d9c7721f91e5e08f46392a879c6a9a",
+          "urls": [
+            "https://raw.githubusercontent.com/TRvlvr/application_data/3826b05b570dbd4fbedbc807758803b35348ba1b/mdx_model_data/model_data_new.json"
+          ]
+        }
+      ],
+      "install": {
+        "strategy": "direct-download",
+        "note": "固定 audio-separator 0.44.1 运行时需要的 UVR 模型列表与参数，避免首次加载时访问 main 分支。"
+      }
+    },
+    {
+      "id": "kim-vocal-2",
+      "required": false,
+      "kind": "model",
+      "version": "Kim_Vocal_2",
+      "license": {
+        "spdx": "NOASSERTION",
+        "source_url": "https://github.com/TRvlvr/model_repo",
+        "redistribution": "optional_download_only"
+      },
+      "files": [
+        {
+          "id": "model",
+          "scope": "installed",
+          "path": "models/audio_separator/Kim_Vocal_2.onnx",
+          "size": 66759214,
+          "sha256": "ce74ef3b6a6024ce44211a07be9cf8bc6d87728cc852a68ab34eb8e58cde9c8b",
+          "urls": [
+            "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/Kim_Vocal_2.onnx"
+          ]
+        }
+      ],
+      "install": {
+        "strategy": "direct-download"
+      }
+    }
+  ]
+}

@@ -7,6 +7,14 @@ import traceback
 import subprocess
 import shutil
 from pathlib import Path
+
+from cuda_runtime import preload_bundled_cuda
+
+
+# Windows 可能优先加载现有 CUDA Toolkit 或包内同名 DLL。必须在导入
+# faster-whisper / CTranslate2 前按绝对路径固定分享版运行库。
+preload_bundled_cuda()
+
 from faster_whisper import WhisperModel
 
 # ================= 统一配置 =================
@@ -180,7 +188,15 @@ def emit_progress(current_time, total_duration):
         # 强制格式化输出并立刻冲刷缓冲区，确保 app.py 瞬间捕获
         print(f"[PROGRESS] {percent:.1f}", flush=True)
 
-def transcribe_and_save(audio_path, output_json_path, model_size=WHISPER_MODEL_NAME, device=WHISPER_DEVICE, use_denoise=False):
+def transcribe_and_save(
+    audio_path,
+    output_json_path,
+    model_size=WHISPER_MODEL_NAME,
+    device=WHISPER_DEVICE,
+    use_denoise=False,
+    use_speaker_diarization=False,
+    primary_speakers=2,
+):
     print(f"[Whisper Worker] 正在加载模型 {model_size} 到 {device}...", flush=True)
     try:
         model = WhisperModel(
@@ -279,7 +295,73 @@ def transcribe_and_save(audio_path, output_json_path, model_size=WHISPER_MODEL_N
                     seg_id += 1
                     emit_progress(segment.end, total_duration) # 广播进度
 
-        # 确保最后进度达到 100%
+        diarization_metadata = {
+            "status": "disabled",
+            "primary_speakers": int(primary_speakers),
+        }
+        if use_speaker_diarization:
+            print("[Whisper Worker] 👥 开始本地多人对话识别...", flush=True)
+            try:
+                from speaker_diarization import (
+                    OTHER_SOUND_LABEL,
+                    diarize_audio_file,
+                    diarize_media,
+                    label_subtitle_records,
+                )
+
+                def emit_diarization_progress(percent):
+                    print(f"[DIARIZATION_PROGRESS] {percent:.1f}", flush=True)
+
+                if is_temp:
+                    speaker_segments, runtime_version = diarize_audio_file(
+                        audio_target,
+                        num_speakers=int(primary_speakers),
+                        progress=emit_diarization_progress,
+                    )
+                else:
+                    speaker_segments, runtime_version = diarize_media(
+                        audio_target,
+                        num_speakers=int(primary_speakers),
+                        progress=emit_diarization_progress,
+                    )
+                subtitles = label_subtitle_records(subtitles, speaker_segments)
+                speaker_labels = {
+                    segment.speaker
+                    for segment in speaker_segments
+                    if segment.speaker != OTHER_SOUND_LABEL
+                }
+                diarization_metadata = {
+                    "status": "completed",
+                    "primary_speakers": len(speaker_labels),
+                    "requested_primary_speakers": int(primary_speakers),
+                    "has_other_sound": any(
+                        segment.speaker == OTHER_SOUND_LABEL
+                        for segment in speaker_segments
+                    ),
+                    "segment_count": len(speaker_segments),
+                    "runtime": {
+                        "name": "sherpa-onnx",
+                        "version": runtime_version,
+                    },
+                }
+                print(
+                    f"[Whisper Worker] ✅ 多人对话识别完成："
+                    f"{len(speaker_labels)}位主要说话人。",
+                    flush=True,
+                )
+            except Exception as diarization_error:
+                diarization_metadata = {
+                    "status": "fallback",
+                    "primary_speakers": int(primary_speakers),
+                    "error": str(diarization_error)[:500],
+                }
+                print(
+                    f"[Whisper Worker] ⚠️ 多人对话识别失败，"
+                    f"保留普通字幕继续处理：{diarization_error}",
+                    flush=True,
+                )
+
+        # Whisper和可选的说话人分离均完成后，再广播最终进度。
         print("[PROGRESS] 100.0", flush=True)
 
         if is_temp and audio_target.exists():
@@ -289,7 +371,8 @@ def transcribe_and_save(audio_path, output_json_path, model_size=WHISPER_MODEL_N
         output_data = {
             "language": lang_code,
             "full_text": "\n".join(full_text_list), 
-            "subtitles": subtitles
+            "subtitles": subtitles,
+            "speaker_diarization": diarization_metadata,
         }
         
         with open(output_json_path, 'w', encoding='utf-8') as f:
@@ -312,6 +395,8 @@ if __name__ == "__main__":
     parser.add_argument("--model", type=str, default=WHISPER_MODEL_NAME)
     # 新增接收参数
     parser.add_argument("--denoise", action="store_true", help="启用 AI 人声分离降噪")
+    parser.add_argument("--diarize", action="store_true", help="启用本地多人对话识别")
+    parser.add_argument("--speakers", type=int, default=2, help="主要说话人数")
 
         
     
@@ -322,5 +407,12 @@ if __name__ == "__main__":
         sys.exit(1)
         
     # 透传给主函数
-    transcribe_and_save(args.input, args.output, args.model, use_denoise=args.denoise)
+    transcribe_and_save(
+        args.input,
+        args.output,
+        args.model,
+        use_denoise=args.denoise,
+        use_speaker_diarization=args.diarize,
+        primary_speakers=args.speakers,
+    )
     os._exit(0)

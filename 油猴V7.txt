@@ -1,0 +1,624 @@
+// ==UserScript==
+// @name         一键发送至本地视听 AI 助手 (V7 播放器增强版)
+// @namespace    http://tampermonkey.net/
+// @version      7.0.1
+// @description  支持 B 站、抖音列表与播放器弹窗，并保存视频作者、发布时间及互动数据。
+// @author       编程大师2.0
+// @match        *://*.bilibili.com/*
+// @match        *://*.douyin.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        unsafeWindow
+// @connect      127.0.0.1
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    const API_URL = 'http://127.0.0.1:8000/api/tasks';
+    let renderDataCacheText = '';
+    let renderDataCache = null;
+
+    function asNonEmptyString(value) {
+        return String(value ?? '').trim();
+    }
+
+    function asFiniteNumber(value) {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+    }
+
+    function compactObject(value) {
+        const result = {};
+        Object.entries(value || {}).forEach(([key, item]) => {
+            if (item === null || item === undefined || item === '') return;
+            if (Array.isArray(item) && item.length === 0) return;
+            if (typeof item === 'object' && !Array.isArray(item)) {
+                const nested = compactObject(item);
+                if (Object.keys(nested).length > 0) result[key] = nested;
+                return;
+            }
+            result[key] = item;
+        });
+        return result;
+    }
+
+    function normalizeWebUrl(value) {
+        const url = asNonEmptyString(value);
+        return url.startsWith('//') ? `https:${url}` : url;
+    }
+
+    function firstMediaUrl(value) {
+        if (typeof value === 'string') return normalizeWebUrl(value);
+        if (!Array.isArray(value)) return '';
+        for (const item of value) {
+            if (typeof item === 'string' && item.trim()) return normalizeWebUrl(item);
+            if (item && typeof item === 'object') {
+                const candidate = item.src || item.url;
+                if (candidate) return normalizeWebUrl(candidate);
+            }
+        }
+        return '';
+    }
+
+    function getDouyinAwemeId(awemeInfo) {
+        if (!awemeInfo || typeof awemeInfo !== 'object') return '';
+        return asNonEmptyString(
+            awemeInfo.awemeId || awemeInfo.aweme_id || awemeInfo.groupId || awemeInfo.group_id
+        );
+    }
+
+    function findAwemeCandidate(props) {
+        if (!props || typeof props !== 'object') return null;
+        const candidates = [
+            props.awemeInfo,
+            props.itemInfo?.awemeInfo,
+            props.itemInfo,
+            props.aweme,
+            props.videoInfo?.awemeInfo,
+            props.videoInfo,
+            props.data?.awemeInfo,
+            props.data?.itemInfo,
+            props.data
+        ];
+        return candidates.find(candidate => candidate && candidate.video) || null;
+    }
+
+    function extractDouyinAwemeFromReact(node) {
+        if (!node) return null;
+        let current = node instanceof HTMLElement ? node : node.parentElement;
+        while (current instanceof HTMLElement) {
+            const fiberKey = Object.keys(current).find(key => key.startsWith('__reactFiber$'));
+            let fiber = fiberKey ? current[fiberKey] : null;
+            let inspected = 0;
+            while (fiber && inspected < 80) {
+                const candidate = findAwemeCandidate(fiber.memoizedProps);
+                if (candidate) return candidate;
+                fiber = fiber.return;
+                inspected += 1;
+            }
+            current = current.parentElement;
+        }
+        return null;
+    }
+
+    function readDouyinRenderData() {
+        const script = document.getElementById('RENDER_DATA');
+        const raw = script?.textContent || '';
+        if (!raw) return null;
+        if (raw === renderDataCacheText) return renderDataCache;
+        renderDataCacheText = raw;
+        try {
+            renderDataCache = JSON.parse(decodeURIComponent(raw));
+        } catch (error) {
+            console.warn('[AI 助手] 无法解析抖音 RENDER_DATA', error);
+            renderDataCache = null;
+        }
+        return renderDataCache;
+    }
+
+    function extractDouyinAwemeFromRenderData(targetId) {
+        const data = readDouyinRenderData();
+        const candidates = [
+            data?.app?.videoDetail,
+            data?.app?.videoDetail?.awemeInfo,
+            data?.app?.awemeDetail,
+            data?.app?.awemeDetail?.awemeInfo
+        ];
+        return candidates.find(candidate => {
+            if (!candidate || !candidate.video) return false;
+            return !targetId || getDouyinAwemeId(candidate) === targetId;
+        }) || null;
+    }
+
+    function extractDouyinAwemeFromPlayer(targetId) {
+        const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+        const candidates = [
+            pageWindow.player?.config?.awemeInfo,
+            window.player?.config?.awemeInfo
+        ];
+        return candidates.find(candidate => {
+            if (!candidate || !candidate.video) return false;
+            return !targetId || getDouyinAwemeId(candidate) === targetId;
+        }) || null;
+    }
+
+    function isVisibleElement(element) {
+        if (!(element instanceof HTMLElement)) return false;
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== 'none'
+            && style.visibility !== 'hidden'
+            && rect.width > 0
+            && rect.height > 0;
+    }
+
+    function getViewportCandidate(element) {
+        if (!isVisibleElement(element)) return null;
+        const rect = element.getBoundingClientRect();
+        const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+        const intersectionWidth = Math.max(
+            0,
+            Math.min(rect.right, viewportWidth) - Math.max(rect.left, 0)
+        );
+        const intersectionHeight = Math.max(
+            0,
+            Math.min(rect.bottom, viewportHeight) - Math.max(rect.top, 0)
+        );
+        const intersectionArea = intersectionWidth * intersectionHeight;
+        if (intersectionArea <= 0) return null;
+
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const centerDistance = Math.hypot(
+            centerX - viewportWidth / 2,
+            centerY - viewportHeight / 2
+        );
+        return { element, intersectionArea, centerDistance };
+    }
+
+    function pickCurrentViewportPlayer(elements) {
+        const candidates = Array.from(elements || [])
+            .map(getViewportCandidate)
+            .filter(Boolean);
+        candidates.sort((left, right) =>
+            left.centerDistance - right.centerDistance
+            || right.intersectionArea - left.intersectionArea
+        );
+        return candidates[0]?.element || null;
+    }
+
+    function findActiveDouyinPlayer() {
+        const explicitActiveNodes = document.querySelectorAll(
+            '[data-e2e="feed-active-video"][data-e2e-vid]'
+        );
+        if (explicitActiveNodes.length > 0) {
+            return pickCurrentViewportPlayer(explicitActiveNodes);
+        }
+
+        const sliderNodes = document.querySelectorAll('#sliderVideo[data-e2e-vid]');
+        if (sliderNodes.length > 0) {
+            return pickCurrentViewportPlayer(sliderNodes);
+        }
+
+        const playingVideo = Array.from(document.querySelectorAll('video')).find(video =>
+            !video.paused && video.readyState > 0 && getViewportCandidate(video)
+        );
+        const playingRoot = playingVideo?.closest('[data-e2e-vid], #sliderVideo');
+        if (playingRoot) return playingRoot;
+
+        if (window.location.pathname.includes('/video/')) {
+            return pickCurrentViewportPlayer(
+                document.querySelectorAll('[data-e2e="feed-video"][data-e2e-vid]')
+            );
+        }
+        return null;
+    }
+
+    function hasVisibleDouyinPlayerMarker() {
+        return Array.from(document.querySelectorAll(
+            '[data-e2e="feed-active-video"][data-e2e-vid], #sliderVideo[data-e2e-vid]'
+        )).some(isVisibleElement);
+    }
+
+    function extractVideoIdFromNode(node) {
+        if (!node) return '';
+        const datasetId = asNonEmptyString(node.getAttribute?.('data-e2e-vid'));
+        if (datasetId) return datasetId;
+
+        const classMatch = asNonEmptyString(node.className).match(/(?:^|\s)video_(\d+)(?:\s|$)/);
+        if (classMatch) return classMatch[1];
+
+        const link = node.matches?.('a[href*="/video/"]')
+            ? node
+            : node.querySelector?.('a[href*="/video/"]');
+        const hrefMatch = asNonEmptyString(link?.href).match(/\/video\/(\d+)/);
+        return hrefMatch ? hrefMatch[1] : '';
+    }
+
+    function chooseDouyinDirectUrl(awemeInfo) {
+        const video = awemeInfo?.video;
+        if (!video) return '';
+
+        const bitRates = Array.isArray(video.bitRateList)
+            ? video.bitRateList.filter(item => item?.format !== 'dash')
+            : [];
+        bitRates.sort((left, right) => {
+            const heightDifference = (Number(right?.height) || 0) - (Number(left?.height) || 0);
+            return heightDifference || ((Number(right?.dataSize) || 0) - (Number(left?.dataSize) || 0));
+        });
+
+        for (const item of bitRates) {
+            const url = item?.playApi || firstMediaUrl(item?.playAddr);
+            if (url) return normalizeWebUrl(url);
+        }
+        return normalizeWebUrl(video.playApi || firstMediaUrl(video.playAddr));
+    }
+
+    function buildDouyinMetadata(awemeInfo, videoId, title, sourceUrl) {
+        const info = awemeInfo || {};
+        const author = info.authorInfo || info.author || {};
+        const stats = info.stats || info.statistics || {};
+        const video = info.video || {};
+        const createTime = asFiniteNumber(info.createTime || info.create_time);
+        const rawDuration = asFiniteNumber(video.duration);
+        const durationSeconds = rawDuration === null
+            ? null
+            : Math.round(rawDuration > 10000 ? rawDuration / 1000 : rawDuration);
+        const playCount = asFiniteNumber(stats.playCount ?? stats.play_count);
+
+        let publishedAt = '';
+        if (createTime !== null && createTime > 0) {
+            const date = new Date(createTime * 1000);
+            if (!Number.isNaN(date.getTime())) publishedAt = date.toISOString();
+        }
+
+        const statistics = compactObject({
+            like_count: asFiniteNumber(stats.diggCount ?? stats.likeCount ?? stats.like_count),
+            comment_count: asFiniteNumber(stats.commentCount ?? stats.comment_count),
+            collect_count: asFiniteNumber(stats.collectCount ?? stats.collect_count),
+            share_count: asFiniteNumber(stats.shareCount ?? stats.share_count),
+            forward_count: asFiniteNumber(stats.forwardCount ?? stats.forward_count),
+            download_count: asFiniteNumber(stats.downloadCount ?? stats.download_count),
+            play_count: playCount !== null && playCount > 0 ? playCount : null
+        });
+
+        return compactObject({
+            schema_version: 1,
+            platform: 'douyin',
+            video_id: videoId,
+            title,
+            source_url: sourceUrl,
+            author: compactObject({
+                name: asNonEmptyString(author.nickname || author.name),
+                user_id: asNonEmptyString(author.uid || info.authorUserId),
+                sec_uid: asNonEmptyString(author.secUid || author.sec_uid),
+                follower_count: asFiniteNumber(author.followerCount ?? author.follower_count),
+                total_favorited: asFiniteNumber(author.totalFavorited ?? author.total_favorited)
+            }),
+            published_at: publishedAt,
+            published_at_unix: createTime,
+            captured_at: new Date().toISOString(),
+            statistics,
+            media: compactObject({
+                duration_seconds: durationSeconds,
+                width: asFiniteNumber(video.width),
+                height: asFiniteNumber(video.height),
+                quality: asNonEmptyString(video.ratio),
+                cover_url: firstMediaUrl(video.coverUrlList || video.cover)
+            })
+        });
+    }
+
+    function resolveDouyinTaskInfo(node, fallbackUrl = '', fallbackTitle = '') {
+        const activeRoot = node || findActiveDouyinPlayer();
+        const locationMatch = window.location.pathname.match(/\/video\/(\d+)/);
+        let videoId = extractVideoIdFromNode(activeRoot) || (locationMatch ? locationMatch[1] : '');
+
+        let awemeInfo = extractDouyinAwemeFromReact(activeRoot);
+        const reactAwemeId = getDouyinAwemeId(awemeInfo);
+        if (videoId && reactAwemeId && reactAwemeId !== videoId) {
+            awemeInfo = null;
+        }
+        if (!awemeInfo) awemeInfo = extractDouyinAwemeFromPlayer(videoId);
+        if (!awemeInfo) awemeInfo = extractDouyinAwemeFromRenderData(videoId);
+        if (!videoId) videoId = getDouyinAwemeId(awemeInfo);
+
+        const sourceUrl = videoId
+            ? `https://www.douyin.com/video/${videoId}`
+            : platforms.douyin.getCleanUrl(fallbackUrl || window.location.href);
+        const domTitle = asNonEmptyString(
+            activeRoot?.querySelector?.('[data-e2e="video-desc"]')?.innerText
+            || activeRoot?.querySelector?.('p')?.innerText
+            || activeRoot?.querySelector?.('img[alt]')?.alt
+        ).replace(/\s*展开\s*$/, '');
+        const title = asNonEmptyString(
+            awemeInfo?.desc || awemeInfo?.itemTitle || domTitle || fallbackTitle || document.title
+        ).replace(/\s+-\s*抖音.*$/, '') || '抖音内容';
+
+        return {
+            url: sourceUrl,
+            title,
+            directUrl: chooseDouyinDirectUrl(awemeInfo),
+            metadata: buildDouyinMetadata(awemeInfo, videoId, title, sourceUrl),
+            videoId,
+            activeRoot
+        };
+    }
+
+    const platforms = {
+        bilibili: {
+            match: () => window.location.hostname.includes('bilibili.com'),
+            getCleanUrl: rawUrl => {
+                if (!rawUrl) return '';
+                const bvMatch = rawUrl.match(/(BV[1-9A-HJ-NP-Za-km-z]{10})/i);
+                if (bvMatch?.[1]) return `https://www.bilibili.com/video/${bvMatch[1]}/`;
+                return normalizeWebUrl(rawUrl);
+            },
+            getCardSelectors: () => '.bili-dyn-card-video, .bili-video-card, .video-card',
+            extractInfo: card => {
+                const coverArea = card.querySelector(
+                    '.bili-dyn-card-video__header, .bili-video-card__image, '
+                    + '.bili-video-card__cover, .bili-cover-card__thumbnail'
+                );
+                const aTag = card.tagName.toLowerCase() === 'a' ? card : card.querySelector('a');
+                const titleNode = card.querySelector(
+                    '.bili-dyn-card-video__title, .bili-video-card__info--tit, '
+                    + '.bili-video-card__title, .title'
+                );
+                const title = titleNode
+                    ? (titleNode.getAttribute('title') || titleNode.innerText.trim())
+                    : 'B站视频';
+                return { coverArea, url: aTag ? aTag.href : '', title };
+            },
+            isDetailPage: () => window.location.pathname.includes('/video/')
+                || window.location.pathname.includes('/list/'),
+            getDetailTitle: () => document.title.replace(/_哔哩哔哩_bilibili.*/, '').trim(),
+            btnStyle: 'left: 6px; bottom: 21px; padding: 2px 6px; font-size: 12px;'
+        },
+        douyin: {
+            match: () => window.location.hostname.includes('douyin.com'),
+            getCleanUrl: rawUrl => {
+                if (!rawUrl) return '';
+                const cleanUrl = normalizeWebUrl(rawUrl);
+                try {
+                    const parsed = new URL(cleanUrl);
+                    return parsed.origin + parsed.pathname;
+                } catch (error) {
+                    return cleanUrl;
+                }
+            },
+            getCardSelectors: () => 'a[href*="/video/"]',
+            extractInfo: card => {
+                const coverArea = card.querySelector('div') || card;
+                const img = card.querySelector('img');
+                const paragraph = card.querySelector('p');
+                const title = asNonEmptyString(img?.alt || paragraph?.innerText) || '抖音内容';
+                return { coverArea, url: card.href, title };
+            },
+            isDetailPage: () => window.location.pathname.includes('/video/')
+                || hasVisibleDouyinPlayerMarker(),
+            getDetailTitle: () => resolveDouyinTaskInfo().title,
+            btnStyle: 'left: 10px; bottom: 35px; padding: 15px 20px; font-size: 14px; '
+                + 'box-shadow: 0 2px 4px rgba(0,0,0,0.3);'
+        }
+    };
+
+    const currentPlatform = Object.values(platforms).find(platform => platform.match());
+    if (!currentPlatform) return;
+
+    function sendTaskToLocal(sourceType, sourcePath, title, btnElement, isSmallBtn = false, metadata = null) {
+        const originalText = btnElement.innerHTML;
+        btnElement.innerHTML = isSmallBtn ? '⏳' : '⏳ 正在发送...';
+        btnElement.style.backgroundColor = '#9e9e9e';
+        btnElement.style.pointerEvents = 'none';
+
+        const options = {};
+        if (metadata && Object.keys(metadata).length > 0) {
+            options.video_metadata = metadata;
+        }
+
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: API_URL,
+            headers: { 'Content-Type': 'application/json' },
+            data: JSON.stringify({
+                source_type: sourceType,
+                source_path: sourcePath,
+                title,
+                options
+            }),
+            onload: response => {
+                if (response.status === 200) {
+                    btnElement.innerHTML = isSmallBtn ? '✅' : '✅ 成功！';
+                    btnElement.style.backgroundColor = '#4caf50';
+                } else {
+                    btnElement.innerHTML = isSmallBtn ? '❌' : '❌ 失败';
+                    btnElement.style.backgroundColor = '#f44336';
+                }
+                setTimeout(() => resetBtn(btnElement, originalText), 3000);
+            },
+            onerror: () => {
+                btnElement.innerHTML = isSmallBtn ? '🚫' : '🚫 失败';
+                btnElement.style.backgroundColor = '#f44336';
+                setTimeout(() => resetBtn(btnElement, originalText), 3000);
+            }
+        });
+    }
+
+    function resetBtn(btn, text) {
+        btn.innerHTML = text;
+        btn.style.backgroundColor = 'rgba(251, 114, 153, 0.85)';
+        btn.style.pointerEvents = 'auto';
+    }
+
+    function resolveTaskInfo(node, fallbackUrl, fallbackTitle) {
+        if (currentPlatform === platforms.douyin) {
+            return resolveDouyinTaskInfo(node, fallbackUrl, fallbackTitle);
+        }
+        return {
+            url: currentPlatform.getCleanUrl(fallbackUrl),
+            title: fallbackTitle,
+            directUrl: '',
+            metadata: null,
+            videoId: ''
+        };
+    }
+
+    function dispatchTask(taskInfo, button, isSmallButton) {
+        if (!taskInfo?.url) {
+            const originalText = button.innerHTML;
+            button.innerHTML = isSmallButton ? '⏳' : '⏳ 请等待当前视频加载';
+            setTimeout(() => resetBtn(button, originalText), 1800);
+            return;
+        }
+        if (taskInfo.directUrl) {
+            sendTaskToLocal(
+                'direct_url',
+                `${taskInfo.url}|||${taskInfo.directUrl}`,
+                taskInfo.title,
+                button,
+                isSmallButton,
+                taskInfo.metadata
+            );
+            return;
+        }
+        sendTaskToLocal(
+            'url',
+            taskInfo.url,
+            taskInfo.title,
+            button,
+            isSmallButton,
+            taskInfo.metadata
+        );
+    }
+
+    function injectCardButtons() {
+        const cards = document.querySelectorAll(currentPlatform.getCardSelectors());
+        cards.forEach(card => {
+            if (card.dataset.aiInjected === 'true' || card.querySelector('.ai-card-btn')) return;
+
+            const { coverArea, url, title } = currentPlatform.extractInfo(card);
+            if (!coverArea || !url) return;
+
+            card.dataset.aiInjected = 'true';
+            coverArea.style.position = 'relative';
+
+            const miniBtn = document.createElement('div');
+            miniBtn.className = 'ai-card-btn';
+            miniBtn.innerHTML = '🤖 AI';
+            miniBtn.style.cssText = `
+                position: absolute; z-index: 100;
+                font-weight: bold; color: #fff;
+                background-color: rgba(251, 114, 153, 0.85); border-radius: 4px;
+                cursor: pointer; backdrop-filter: blur(2px);
+                ${currentPlatform.btnStyle}
+            `;
+
+            miniBtn.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                dispatchTask(resolveTaskInfo(card, url, title), miniBtn, true);
+            });
+            coverArea.appendChild(miniBtn);
+        });
+    }
+
+    function getCurrentDetailTaskInfo() {
+        if (currentPlatform === platforms.douyin) {
+            const activePlayer = findActiveDouyinPlayer();
+            if (!activePlayer && !window.location.pathname.includes('/video/')) {
+                return null;
+            }
+            return resolveDouyinTaskInfo(activePlayer, window.location.href, document.title);
+        }
+        return {
+            url: currentPlatform.getCleanUrl(window.location.href),
+            title: currentPlatform.getDetailTitle(),
+            directUrl: '',
+            metadata: null,
+            videoId: ''
+        };
+    }
+
+    function syncGlobalButton() {
+        let button = document.getElementById('ai-global-btn');
+        if (!currentPlatform.isDetailPage()) {
+            if (button) button.remove();
+            return;
+        }
+        if (button) return;
+
+        button = document.createElement('button');
+        button.id = 'ai-global-btn';
+        button.innerHTML = '🤖 发送给 AI 总结';
+        button.style.cssText = `
+            position: fixed; right: 30px; bottom: 120px; z-index: 999999;
+            padding: 12px 24px; font-size: 16px; font-weight: bold; color: #fff;
+            background-color: rgba(251, 114, 153, 0.9); border: none;
+            border-radius: 8px; cursor: pointer;
+            box-shadow: 0 4px 12px rgba(251, 114, 153, 0.4);
+        `;
+        button.addEventListener('click', () => {
+            dispatchTask(getCurrentDetailTaskInfo(), button, false);
+        });
+        document.body.appendChild(button);
+    }
+
+    function checkAndSeekVideo() {
+        const seekTime = new URLSearchParams(window.location.search).get('ai_seek');
+        if (!seekTime) return;
+
+        const timeInSeconds = parseFloat(seekTime);
+        if (Number.isNaN(timeInSeconds)) return;
+        console.log(`[AI 助手] 收到跨域跳转指令，目标时间: ${timeInSeconds}秒`);
+
+        let attempts = 0;
+        const seekInterval = setInterval(() => {
+            attempts += 1;
+            const video = document.querySelector('video');
+            if (video && video.readyState >= 1) {
+                video.currentTime = timeInSeconds;
+                video.play().catch(error => {
+                    console.warn('[AI 助手] 浏览器自动播放安全策略拦截，需手动点击播放', error);
+                });
+                clearInterval(seekInterval);
+                console.log(`[AI 助手] 已跳转至 ${timeInSeconds}秒`);
+            }
+            if (attempts > 40) clearInterval(seekInterval);
+        }, 500);
+    }
+
+    function start() {
+        injectCardButtons();
+        syncGlobalButton();
+        checkAndSeekVideo();
+
+        let timeout;
+        const observer = new MutationObserver(mutations => {
+            clearTimeout(timeout);
+            timeout = setTimeout(() => {
+                const relevant = mutations.some(mutation =>
+                    mutation.type === 'attributes'
+                    || mutation.addedNodes.length > 0
+                    || mutation.removedNodes.length > 0
+                );
+                if (!relevant) return;
+                injectCardButtons();
+                syncGlobalButton();
+            }, 300);
+        });
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['data-e2e-vid', 'data-active']
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        window.addEventListener('DOMContentLoaded', start, { once: true });
+    } else {
+        start();
+    }
+})();
