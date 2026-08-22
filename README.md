@@ -53,11 +53,8 @@ CPU 通用模式和其他操作系统尚未纳入当前版本的验证范围。
 - `manifests/artifacts.json`：外部工具和模型的版本、下载地址、大小及 SHA-256；
 - `docs/RESOURCE_DOWNLOADS.md`：外部资源下载和目录说明。
 
-## 数据与隐私
-
-仓库不包含 API Key、Cookie、任务数据库、字幕库、知识卡片、用户媒体、虚拟环境、运行缓存或大型模型。
-
-运行后生成的个人配置和数据均保存在本机项目目录。不要把 `data`、`runtime`、`models`、`tools` 或个人设置文件提交到公开仓库；根目录 `.gitignore` 已提供基础保护，但上传前仍应人工检查待提交文件。
+## 模型整理下载链接
+百度网盘链接: https://pan.baidu.com/s/1oBaB4r3Y6KaGjX9i7m9COw?pwd=pjhy 提取码: pjhy
 
 ## 许可证
 
